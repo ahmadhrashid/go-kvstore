@@ -28,14 +28,16 @@ func main() {
 	// go handleConnection(conn)
 	defer conn.Close()
 	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
-	if err != nil {
-		fmt.Println("Error reading from connection: ", err.Error())
-		return
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			fmt.Println("Error reading from connection: ", err.Error())
+			return
+		}
+		if strings.Contains(string(buf[:n]), "PING\r\n"){
+			conn.Write([]byte("+PONG\r\n"))
+		} 
 	}
-	if strings.Contains(string(buf[:n]), "PING\r\n"){
-		conn.Write([]byte("+PONG\r\n"))
-	} 
 }
 
 // func handleConnection(conn net.Conn) {

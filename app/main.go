@@ -16,10 +16,21 @@ var _ = os.Exit
 
 var db = make(map[string]string)
 var expiry_db = make(map[string]time.Time)
+var dir = ""
+var dbfilename = ""
 
 func main() {
 	fmt.Println("Logs from your program will appear here!")
-	
+
+	if len(os.Args) > 1 {
+		if len(os.Args) < 5 {
+			fmt.Println("Usage: go run main.go --dir <directory> --dbfilename <filename>")
+			os.Exit(1)
+		}
+		dir = os.Args[2]
+		dbfilename = os.Args[4]
+	}
+
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
@@ -39,7 +50,7 @@ func main() {
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
-	
+
 	for {
 		// Parse the RESP array
 		commands, err := parseRESPArray(reader)
@@ -47,14 +58,14 @@ func handleConnection(conn net.Conn) {
 			fmt.Println("Error parsing RESP: ", err.Error())
 			return
 		}
-		
+
 		if len(commands) == 0 {
 			continue
 		}
-		
+
 		// Handle commands (case-insensitive)
 		command := strings.ToUpper(commands[0])
-		
+
 		switch command {
 		case "PING":
 			conn.Write([]byte("+PONG\r\n"))
@@ -78,15 +89,14 @@ func handleConnection(conn net.Conn) {
 						return
 					}
 					expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
-					
+
 				}
 				conn.Write([]byte("+OK\r\n"))
 			} else {
 				// Error: SET requires at least two arguments
 				conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
 			}
-		
-		
+
 		case "GET":
 			if len(commands) >= 2 {
 				key := commands[1]
@@ -108,6 +118,17 @@ func handleConnection(conn net.Conn) {
 				// Error: GET requires an argument
 				conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
 			}
+		case "CONFIG":
+			if len(commands) != 3 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'redis-cli' command\r\n"))
+				continue
+			}
+			key := commands[2]
+			if key == "dir" {
+				conn.Write([]byte(fmt.Sprintf("*2\r\n$3\r\ndir\r\n$%d\r\n%s\r\n", len(dir), dir)))
+			} else if key == "dbfilename" {
+				conn.Write([]byte(fmt.Sprintf("*2\r\n$10\r\ndbfilename\r\n$%d\r\n%s\r\n", len(dbfilename), dbfilename)))
+			}
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
@@ -121,21 +142,21 @@ func parseRESPArray(reader *bufio.Reader) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Remove \r\n
 	line = strings.TrimSpace(line)
-	
+
 	// Check if it's an array
 	if len(line) == 0 || line[0] != '*' {
 		return nil, fmt.Errorf("expected array indicator '*'")
 	}
-	
+
 	// Parse the number of elements
 	count, err := strconv.Atoi(line[1:])
 	if err != nil {
 		return nil, fmt.Errorf("invalid array count: %v", err)
 	}
-	
+
 	// Parse each element
 	commands := make([]string, count)
 	for i := 0; i < count; i++ {
@@ -145,7 +166,7 @@ func parseRESPArray(reader *bufio.Reader) ([]string, error) {
 		}
 		commands[i] = command
 	}
-	
+
 	return commands, nil
 }
 
@@ -155,33 +176,33 @@ func parseRESPBulkString(reader *bufio.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Remove \r\n
 	line = strings.TrimSpace(line)
-	
+
 	// Check if it's a bulk string
 	if len(line) == 0 || line[0] != '$' {
 		return "", fmt.Errorf("expected bulk string indicator '$'")
 	}
-	
+
 	// Parse the length
 	length, err := strconv.Atoi(line[1:])
 	if err != nil {
 		return "", fmt.Errorf("invalid bulk string length: %v", err)
 	}
-	
+
 	// Read the actual string
 	data := make([]byte, length)
 	_, err = reader.Read(data)
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Read the trailing \r\n
 	_, err = reader.ReadString('\n')
 	if err != nil {
 		return "", err
 	}
-	
+
 	return string(data), nil
 }

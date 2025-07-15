@@ -19,12 +19,15 @@ var db = make(map[string]string)
 var expiry_db = make(map[string]time.Time)
 var dir = ""
 var dbfilename = ""
+var port = ""
+var replicaof = ""
 
 func main() {
 	// Define flags
 	dirFlag := flag.String("dir", "", "Directory for RDB file")
 	dbfilenameFlag := flag.String("dbfilename", "", "RDB filename")
 	portFlag := flag.String("port", "6379", "Port to listen on")
+	replicaFlag := flag.String("replicaof", "", "Master Redis Server")
 
 	// Parse flags
 	flag.Parse()
@@ -32,9 +35,11 @@ func main() {
 	// Assign to global variables (if you want to keep using them)
 	dir = *dirFlag
 	dbfilename = *dbfilenameFlag
-	port := *portFlag
+	port = *portFlag
+	replicaof = *replicaFlag
 
 	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", dir, dbfilename, port)
+	fmt.Printf("Replica of: %s", replicaof)
 
 	fmt.Println("Logs from your program will appear here!")
 
@@ -178,6 +183,15 @@ func handleConnection(conn net.Conn) {
 			for _, k := range keys {
 				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k)))
 			}
+		case "INFO":
+			role := ""
+			if replicaof == "" {
+				role = "role:master"
+			} else {
+				role = "role:slave"
+			}
+			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(role), role)))
+
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))

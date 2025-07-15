@@ -13,6 +13,8 @@ import (
 var _ = net.Listen
 var _ = os.Exit
 
+var db = make(map[string]string)
+
 func main() {
 	fmt.Println("Logs from your program will appear here!")
 	
@@ -62,6 +64,26 @@ func handleConnection(conn net.Conn) {
 			} else {
 				// Error: ECHO requires an argument
 				conn.Write([]byte("-ERR wrong number of arguments for 'echo' command\r\n"))
+			}
+		case "SET":
+			if len(commands) >= 3 {
+				// Set the key-value pair
+				db[commands[1]] = commands[2]
+				conn.Write([]byte("+OK\r\n"))
+			} else {
+				// Error: SET requires at least two arguments
+				conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
+			}
+		
+		
+		case "GET":
+			if len(commands) >= 2 {
+				// Get the value for the key
+				response := fmt.Sprintf("$%d\r\n%s\r\n", len(db[commands[1]]), db[commands[1]])
+				conn.Write([]byte(response))
+			} else {
+				// Error: GET requires an argument
+				conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
 			}
 		default:
 			// Unknown command

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -20,16 +21,22 @@ var dir = ""
 var dbfilename = ""
 
 func main() {
-	fmt.Println("Logs from your program will appear here!")
+	// Define flags
+	dirFlag := flag.String("dir", "", "Directory for RDB file")
+	dbfilenameFlag := flag.String("dbfilename", "", "RDB filename")
+	portFlag := flag.String("port", "6379", "Port to listen on")
 
-	if len(os.Args) > 1 {
-		if len(os.Args) < 5 {
-			fmt.Println("Usage: go run main.go --dir <directory> --dbfilename <filename>")
-			os.Exit(1)
-		}
-		dir = os.Args[2]
-		dbfilename = os.Args[4]
-	}
+	// Parse flags
+	flag.Parse()
+
+	// Assign to global variables (if you want to keep using them)
+	dir = *dirFlag
+	dbfilename = *dbfilenameFlag
+	port := *portFlag
+
+	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", dir, dbfilename, port)
+
+	fmt.Println("Logs from your program will appear here!")
 
 	// --- RDB loading for extensibility ---
 	if dir != "" && dbfilename != "" {
@@ -51,7 +58,7 @@ func main() {
 		}
 	}
 
-	l, err := net.Listen("tcp", "0.0.0.0:6379")
+	l, err := net.Listen("tcp", "0.0.0.0:"+port)
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
 		os.Exit(1)

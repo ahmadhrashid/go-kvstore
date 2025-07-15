@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Ensures gofmt doesn't remove the "net" and "os" imports in stage 1 (feel free to remove this!)
@@ -14,6 +15,7 @@ var _ = net.Listen
 var _ = os.Exit
 
 var db = make(map[string]string)
+var expiry_db = make(map[string]time.Time)
 
 func main() {
 	fmt.Println("Logs from your program will appear here!")
@@ -69,6 +71,15 @@ func handleConnection(conn net.Conn) {
 			if len(commands) >= 3 {
 				// Set the key-value pair
 				db[commands[1]] = commands[2]
+				if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
+					db_expire_time, err := strconv.Atoi(commands[4])
+					if err != nil {
+						conn.Write([]byte("-ERR invalid expiration time\r\n"))
+						return
+					}
+					expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
+					
+				}
 				conn.Write([]byte("+OK\r\n"))
 			} else {
 				// Error: SET requires at least two arguments
@@ -78,9 +89,21 @@ func handleConnection(conn net.Conn) {
 		
 		case "GET":
 			if len(commands) >= 2 {
-				// Get the value for the key
-				response := fmt.Sprintf("$%d\r\n%s\r\n", len(db[commands[1]]), db[commands[1]])
-				conn.Write([]byte(response))
+				key := commands[1]
+				val, exists := db[key]
+				expiry, has_expiry := expiry_db[key]
+				if has_expiry && time.Now().After(expiry) {
+					// Key expired, delete it
+					delete(db, key)
+					delete(expiry_db, key)
+					exists = false // Mark as not existing after deletion
+					conn.Write([]byte("$-1\r\n"))
+				} else if !exists {
+					conn.Write([]byte("$-1\r\n"))
+				} else {
+					response := fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)
+					conn.Write([]byte(response))
+				}
 			} else {
 				// Error: GET requires an argument
 				conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))

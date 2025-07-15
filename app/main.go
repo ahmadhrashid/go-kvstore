@@ -31,6 +31,26 @@ func main() {
 		dbfilename = os.Args[4]
 	}
 
+	// --- RDB loading for extensibility ---
+	if dir != "" && dbfilename != "" {
+		fmt.Println("Loading RDB file from ", dir, "/", dbfilename)
+		rdbPath := dir + "/" + dbfilename
+		if _, err := os.Stat(rdbPath); err == nil {
+			fmt.Println("RDB file found")
+			kv, exp, err := LoadRDBFile(rdbPath)
+			if err == nil {
+				for k, v := range kv {
+					db[k] = v
+				}
+				for k, t := range exp {
+					expiry_db[k] = t
+				}
+			} else {
+				fmt.Println("Failed to load RDB:", err)
+			}
+		}
+	}
+
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
@@ -54,7 +74,10 @@ func handleConnection(conn net.Conn) {
 	for {
 		// Parse the RESP array
 		commands, err := parseRESPArray(reader)
-		if err != nil {
+		if err != nil && err.Error() == "EOF" {
+			fmt.Println("Client disconnected")
+			return
+		} else if err != nil {
 			fmt.Println("Error parsing RESP: ", err.Error())
 			return
 		}
@@ -128,6 +151,25 @@ func handleConnection(conn net.Conn) {
 				conn.Write([]byte(fmt.Sprintf("*2\r\n$3\r\ndir\r\n$%d\r\n%s\r\n", len(dir), dir)))
 			} else if key == "dbfilename" {
 				conn.Write([]byte(fmt.Sprintf("*2\r\n$10\r\ndbfilename\r\n$%d\r\n%s\r\n", len(dbfilename), dbfilename)))
+			}
+		case "KEYS":
+			if len(commands) != 2 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'keys' command\r\n"))
+				continue
+			}
+			pattern := commands[1]
+			keys := make([]string, 0)
+			if pattern == "*" {
+				for k := range db {
+					keys = append(keys, k)
+				}
+			}
+			if len(keys) == 0 {
+				conn.Write([]byte("*0\r\n"))
+			}
+			conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(keys))))
+			for _, k := range keys {
+				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k)))
 			}
 		default:
 			// Unknown command

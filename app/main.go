@@ -204,6 +204,8 @@ func handleConnection(conn net.Conn) {
 
 			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(response), response)))
 
+		case "REPLCONF":
+			conn.Write([]byte("+OK\r\n"))
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))

@@ -41,6 +41,30 @@ func main() {
 	replicaof = *replicaFlag
 	if replicaof == "" {
 		master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+	} else { // Parse host and port from replicaof (format: "host port")
+		parts := strings.Fields(replicaof)
+		if len(parts) == 2 {
+			masterHost := parts[0]
+			masterPort := parts[1]
+			fmt.Printf("Connecting to master at %s:%s...\n", masterHost, masterPort)
+			conn, err := net.Dial("tcp", masterHost+":"+masterPort)
+			if err != nil {
+				fmt.Println("Failed to connect to master:", err)
+				os.Exit(1)
+			}
+			defer conn.Close()
+			// Send RESP PING: *1\r\n$4\r\nPING\r\n
+			ping := "*1\r\n$4\r\nPING\r\n"
+			_, err = conn.Write([]byte(ping))
+			if err != nil {
+				fmt.Println("Failed to send PING to master:", err)
+				os.Exit(1)
+			}
+			fmt.Println("Sent PING to master.")
+		} else {
+			fmt.Println("Invalid --replicaof format. Use: --replicaof <host> <port>")
+			os.Exit(1)
+		}
 	}
 
 	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", dir, dbfilename, port)
@@ -67,6 +91,8 @@ func main() {
 			}
 		}
 	}
+
+	// After parsing flags and before starting the listener
 
 	l, err := net.Listen("tcp", "0.0.0.0:"+port)
 	if err != nil {

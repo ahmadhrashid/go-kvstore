@@ -210,6 +210,16 @@ func handleConnection(conn net.Conn) {
 			// Respond with +FULLRESYNC <REPL_ID> 0\r\n
 			response := fmt.Sprintf("+FULLRESYNC %s 0\r\n", master_replid)
 			conn.Write([]byte(response))
+			// Send empty RDB file as $<length>\r\n<contents>
+			var emptyRDB = []byte{
+				0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31,
+				0xFA, 0x09, 0x72, 0x65, 0x64, 0x69, 0x73, 0x2D, 0x76, 0x65, 0x72,
+				0x06, 0x36, 0x2E, 0x30, 0x2E, 0x31, 0x36,
+				0xFF, 0x89, 0x3B, 0xB7, 0x4E, 0xF8, 0x0F, 0x77, 0x19,
+			}
+			rdbHeader := fmt.Sprintf("$%d\r\n", len(emptyRDB))
+			conn.Write([]byte(rdbHeader))
+			conn.Write(emptyRDB)
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))

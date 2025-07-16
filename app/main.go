@@ -206,6 +206,10 @@ func handleConnection(conn net.Conn) {
 
 		case "REPLCONF":
 			conn.Write([]byte("+OK\r\n"))
+		case "PSYNC":
+			// Respond with +FULLRESYNC <REPL_ID> 0\r\n
+			response := fmt.Sprintf("+FULLRESYNC %s 0\r\n", master_replid)
+			conn.Write([]byte(response))
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))

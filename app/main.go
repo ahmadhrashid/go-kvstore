@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,11 @@ var port = ""
 var replicaof = ""
 var master_replid = ""
 var master_repl_offset = 0
+
+var (
+	replicaConns   = make(map[net.Conn]struct{})
+	replicaConnsMu sync.Mutex
+)
 
 func main() {
 	fmt.Println("Logs from your program will appear here!")
@@ -135,6 +141,7 @@ func handleConnection(conn net.Conn) {
 
 				}
 				conn.Write([]byte("+OK\r\n"))
+				propagateToReplicas(commands)
 			} else {
 				// Error: SET requires at least two arguments
 				conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
@@ -220,6 +227,9 @@ func handleConnection(conn net.Conn) {
 			rdbHeader := fmt.Sprintf("$%d\r\n", len(emptyRDB))
 			conn.Write([]byte(rdbHeader))
 			conn.Write(emptyRDB)
+			replicaConnsMu.Lock()
+			replicaConns[conn] = struct{}{}
+			replicaConnsMu.Unlock()
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
@@ -379,4 +389,18 @@ func encodeRESPArray(args ...string) string {
 		resp += fmt.Sprintf("$%d\r\n%s\r\n", len(arg), arg)
 	}
 	return resp
+}
+
+func propagateToReplicas(commands []string) {
+	msg := encodeRESPArray(commands...)
+	replicaConnsMu.Lock()
+	defer replicaConnsMu.Unlock()
+	for c := range replicaConns {
+		_, err := c.Write([]byte(msg))
+		if err != nil {
+			// Remove dead connections
+			c.Close()
+			delete(replicaConns, c)
+		}
+	}
 }

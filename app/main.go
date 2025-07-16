@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -12,22 +13,17 @@ import (
 	"time"
 )
 
-// Ensures gofmt doesn't remove the "net" and "os" imports in stage 1 (feel free to remove this!)
-var _ = net.Listen
-var _ = os.Exit
-
-var db = make(map[string]string)
-var expiry_db = make(map[string]time.Time)
-var dir = ""
-var dbfilename = ""
-var port = ""
-var replicaof = ""
-var master_replid = ""
-var master_repl_offset = 0
-
 var (
-	replicaConns   = make(map[net.Conn]struct{})
-	replicaConnsMu sync.Mutex
+	db                 = make(map[string]string)
+	expiry_db          = make(map[string]time.Time)
+	dir                = ""
+	dbfilename         = ""
+	port               = ""
+	replicaof          = ""
+	master_replid      = ""
+	master_repl_offset = 0
+	replicaConns       = make(map[net.Conn]struct{})
+	replicaConnsMu     sync.Mutex
 )
 
 func main() {
@@ -48,9 +44,6 @@ func main() {
 	replicaof = *replicaFlag
 	if replicaof == "" {
 		master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
-	} else {
-		connectToMasterAndHandshake(replicaof)
-		fmt.Printf("Replica of: %s", replicaof)
 	}
 
 	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", dir, dbfilename, port)
@@ -75,13 +68,19 @@ func main() {
 		}
 	}
 
-	// After parsing flags and before starting the listener
-
+	// Start listening immediately
 	l, err := net.Listen("tcp", "0.0.0.0:"+port)
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
 		os.Exit(1)
 	}
+
+	// If we're a replica, start the handshake in a goroutine
+	if replicaof != "" {
+		go connectToMasterAndHandshake(replicaof)
+		fmt.Printf("Replica of: %s", replicaof)
+	}
+
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -90,12 +89,14 @@ func main() {
 		}
 		go handleConnection(conn)
 	}
-
 }
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
+
+	// Check if we're running as a replica
+	isReplica := replicaof != ""
 
 	for {
 		// Parse the RESP array
@@ -134,17 +135,23 @@ func handleConnection(conn net.Conn) {
 				if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
 					db_expire_time, err := strconv.Atoi(commands[4])
 					if err != nil {
-						conn.Write([]byte("-ERR invalid expiration time\r\n"))
+						if !isReplica {
+							conn.Write([]byte("-ERR invalid expiration time\r\n"))
+						}
 						return
 					}
 					expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
 
 				}
-				conn.Write([]byte("+OK\r\n"))
-				propagateToReplicas(commands)
+				if !isReplica {
+					conn.Write([]byte("+OK\r\n"))
+					propagateToReplicas(commands)
+				}
 			} else {
 				// Error: SET requires at least two arguments
-				conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
+				if !isReplica {
+					conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
+				}
 			}
 
 		case "GET":
@@ -381,6 +388,79 @@ func connectToMasterAndHandshake(replicaof string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Received after PSYNC: %s", resp)
+
+	// --- Read the RDB file sent by the master ---
+	// Read the bulk string header manually to avoid consuming extra bytes
+	rdbHeader, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("Failed to read RDB header from master:", err)
+		os.Exit(1)
+	}
+	if !strings.HasPrefix(rdbHeader, "$") {
+		fmt.Println("Invalid RDB header from master:", rdbHeader)
+		os.Exit(1)
+	}
+	lengthStr := strings.TrimSpace(rdbHeader[1:]) // remove '$' and \r\n
+	length, err := strconv.Atoi(lengthStr)
+	if err != nil {
+		fmt.Println("Invalid RDB length from master:", lengthStr)
+		os.Exit(1)
+	}
+	rdbData := make([]byte, length)
+	_, err = io.ReadFull(reader, rdbData)
+	if err != nil {
+		fmt.Println("Failed to read RDB data from master:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Read RDB file of %d bytes from master\n", length)
+
+	// Now continuously read and process propagated commands from the master
+	for {
+		// Peek at the next few bytes to see what we're about to read
+		peekBytes, err := reader.Peek(10)
+		if err != nil {
+			fmt.Println("Error peeking at next bytes:", err)
+			return
+		}
+		fmt.Printf("About to read bytes: %q\n", peekBytes)
+
+		commands, err := parseRESPArray(reader)
+		if err != nil {
+			// If we get EOF or connection closed, that's normal - no more commands
+			if err.Error() == "EOF" || strings.Contains(err.Error(), "connection") {
+				fmt.Println("No more propagated commands from master")
+				return
+			}
+			fmt.Println("Error reading propagated command from master:", err)
+			return
+		}
+		if len(commands) == 0 {
+			continue
+		}
+
+		fmt.Printf("Received propagated command: %v\n", commands)
+
+		// Process the command (same logic as handleConnection but without sending responses)
+		command := strings.ToUpper(commands[0])
+		switch command {
+		case "SET":
+			if len(commands) >= 3 {
+				db[commands[1]] = commands[2]
+				if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
+					db_expire_time, err := strconv.Atoi(commands[4])
+					if err != nil {
+						fmt.Println("Invalid expiration time in propagated command:", err)
+						continue
+					}
+					expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
+				}
+				fmt.Printf("Applied propagated SET %s = %s\n", commands[1], commands[2])
+			}
+		// Add other write commands as needed (DEL, etc.)
+		default:
+			fmt.Printf("Received propagated command: %s\n", command)
+		}
+	}
 }
 
 func encodeRESPArray(args ...string) string {

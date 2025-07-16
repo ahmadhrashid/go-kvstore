@@ -25,6 +25,7 @@ var master_replid = ""
 var master_repl_offset = 0
 
 func main() {
+	fmt.Println("Logs from your program will appear here!")
 	// Define flags
 	dirFlag := flag.String("dir", "", "Directory for RDB file")
 	dbfilenameFlag := flag.String("dbfilename", "", "RDB filename")
@@ -41,36 +42,12 @@ func main() {
 	replicaof = *replicaFlag
 	if replicaof == "" {
 		master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
-	} else { // Parse host and port from replicaof (format: "host port")
-		parts := strings.Fields(replicaof)
-		if len(parts) == 2 {
-			masterHost := parts[0]
-			masterPort := parts[1]
-			fmt.Printf("Connecting to master at %s:%s...\n", masterHost, masterPort)
-			conn, err := net.Dial("tcp", masterHost+":"+masterPort)
-			if err != nil {
-				fmt.Println("Failed to connect to master:", err)
-				os.Exit(1)
-			}
-			defer conn.Close()
-			// Send RESP PING: *1\r\n$4\r\nPING\r\n
-			ping := "*1\r\n$4\r\nPING\r\n"
-			_, err = conn.Write([]byte(ping))
-			if err != nil {
-				fmt.Println("Failed to send PING to master:", err)
-				os.Exit(1)
-			}
-			fmt.Println("Sent PING to master.")
-		} else {
-			fmt.Println("Invalid --replicaof format. Use: --replicaof <host> <port>")
-			os.Exit(1)
-		}
+	} else {
+		connectToMasterAndHandshake(replicaof)
+		fmt.Printf("Replica of: %s", replicaof)
 	}
 
 	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", dir, dbfilename, port)
-	fmt.Printf("Replica of: %s", replicaof)
-
-	fmt.Println("Logs from your program will appear here!")
 
 	// --- RDB loading for extensibility ---
 	if dir != "" && dbfilename != "" {
@@ -303,4 +280,73 @@ func parseRESPBulkString(reader *bufio.Reader) (string, error) {
 	}
 
 	return string(data), nil
+}
+
+func connectToMasterAndHandshake(replicaof string) {
+	parts := strings.Fields(replicaof)
+	if len(parts) != 2 {
+		fmt.Println("Invalid --replicaof format. Use: --replicaof <host> <port>")
+		os.Exit(1)
+	}
+	masterHost := parts[0]
+	masterPort := parts[1]
+	fmt.Printf("Connecting to master at %s:%s...\n", masterHost, masterPort)
+	conn, err := net.Dial("tcp", masterHost+":"+masterPort)
+	if err != nil {
+		fmt.Println("Failed to connect to master:", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	// Send PING
+	ping := encodeRESPArray("PING")
+	_, err = conn.Write([]byte(ping))
+	if err != nil {
+		fmt.Println("Failed to send PING to master:", err)
+		os.Exit(1)
+	}
+	// Wait for response
+	resp, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("Failed to read PING response from master:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Received after PING: %s", resp)
+
+	// Send REPLCONF listening-port
+	replconf := encodeRESPArray("REPLCONF", "listening-port", port)
+	_, err = conn.Write([]byte(replconf))
+	if err != nil {
+		fmt.Println("Failed to send REPLCONF to master")
+		os.Exit(1)
+	}
+	resp, err = reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("Failed to read REPLCONF response from master:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Received after REPLCONF listening-port: %s", resp)
+
+	// Send REPLCONF capa psync2
+	replconf = encodeRESPArray("REPLCONF", "capa", "psync2")
+	_, err = conn.Write([]byte(replconf))
+	if err != nil {
+		fmt.Println("Failed to send REPLCONF to master")
+		os.Exit(1)
+	}
+	resp, err = reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("Failed to read REPLCONF capa response from master:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Received after REPLCONF capa: %s", resp)
+}
+
+func encodeRESPArray(args ...string) string {
+	resp := fmt.Sprintf("*%d\r\n", len(args))
+	for _, arg := range args {
+		resp += fmt.Sprintf("$%d\r\n%s\r\n", len(arg), arg)
+	}
+	return resp
 }

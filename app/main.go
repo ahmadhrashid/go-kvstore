@@ -332,6 +332,9 @@ func connectToMasterAndHandshake(replicaof string) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
+	// Track offset (number of bytes processed)
+	offset := 0
+
 	// Send PING
 	ping := encodeRESPArray("PING")
 	_, err = conn.Write([]byte(ping))
@@ -438,7 +441,9 @@ func connectToMasterAndHandshake(replicaof string) {
 			continue
 		}
 
-		fmt.Printf("Received propagated command: %v\n", commands)
+		// Calculate the size of the command we just read
+		commandSize := len(encodeRESPArray(commands...))
+		fmt.Printf("Received propagated command: %v (size: %d bytes)\n", commands, commandSize)
 
 		// Process the command (same logic as handleConnection but without sending responses)
 		command := strings.ToUpper(commands[0])
@@ -456,10 +461,27 @@ func connectToMasterAndHandshake(replicaof string) {
 				}
 				fmt.Printf("Applied propagated SET %s = %s\n", commands[1], commands[2])
 			}
-		// Add other write commands as needed (DEL, etc.)
+		case "REPLCONF":
+			if strings.ToUpper(commands[1]) == "GETACK" {
+				// Respond with current offset (before processing this GETACK command)
+				resp := encodeRESPArray("REPLCONF", "ACK", fmt.Sprintf("%d", offset))
+				_, err = conn.Write([]byte(resp))
+				if err != nil {
+					fmt.Println("Failed to send GETACK response to master")
+					os.Exit(1)
+				}
+				fmt.Printf("Sent REPLCONF ACK %d\n", offset)
+			}
+		case "PING":
+			// Silently process PING commands from master
+			fmt.Printf("Received PING from master\n")
 		default:
 			fmt.Printf("Received propagated command: %s\n", command)
 		}
+
+		// Update offset after processing the command
+		offset += commandSize
+		fmt.Printf("Updated offset to: %d\n", offset)
 	}
 }
 

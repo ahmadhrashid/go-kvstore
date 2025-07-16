@@ -21,6 +21,8 @@ var dir = ""
 var dbfilename = ""
 var port = ""
 var replicaof = ""
+var master_replid = ""
+var master_repl_offset = 0
 
 func main() {
 	// Define flags
@@ -37,6 +39,9 @@ func main() {
 	dbfilename = *dbfilenameFlag
 	port = *portFlag
 	replicaof = *replicaFlag
+	if replicaof == "" {
+		master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+	}
 
 	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", dir, dbfilename, port)
 	fmt.Printf("Replica of: %s", replicaof)
@@ -184,13 +189,17 @@ func handleConnection(conn net.Conn) {
 				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k)))
 			}
 		case "INFO":
-			role := ""
+			response := ""
 			if replicaof == "" {
-				role = "role:master"
+				response = fmt.Sprintf("role:master master_replid:%s master_repl_offset:%d", master_replid, master_repl_offset)
 			} else {
-				role = "role:slave"
+				response = "role:slave"
 			}
-			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(role), role)))
+			if replicaof != "" {
+
+			}
+
+			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(response), response)))
 
 		default:
 			// Unknown command

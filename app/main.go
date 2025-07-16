@@ -341,6 +341,20 @@ func connectToMasterAndHandshake(replicaof string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Received after REPLCONF capa: %s", resp)
+
+	// Send PSYNC ? -1
+	psync := encodeRESPArray("PSYNC", "?", "-1")
+	_, err = conn.Write([]byte(psync))
+	if err != nil {
+		fmt.Println("Failed to send PSYNC to master")
+		os.Exit(1)
+	}
+	resp, err = reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("Failed to read PSYNC response from master:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Received after PSYNC: %s", resp)
 }
 
 func encodeRESPArray(args ...string) string {

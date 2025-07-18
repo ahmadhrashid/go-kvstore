@@ -237,6 +237,10 @@ func handleConnection(conn net.Conn) {
 			replicaConnsMu.Lock()
 			replicaConns[conn] = struct{}{}
 			replicaConnsMu.Unlock()
+
+		case "WAIT":
+			msg := fmt.Sprintf(":%d\r\n", len(replicaConns))
+			conn.Write([]byte(msg))
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))

@@ -14,22 +14,33 @@ import (
 )
 
 var (
-	db                 = make(map[string]string)
-	expiry_db          = make(map[string]time.Time)
-	dir                = ""
-	dbfilename         = ""
-	port               = ""
-	replicaof          = ""
-	master_replid      = ""
-	master_repl_offset = 0
-	replicaConns       = make(map[net.Conn]struct{})
-	replicaConnsMu     sync.Mutex
+	db        = make(map[string]string)
+	expiry_db = make(map[string]time.Time)
+
+	dbfilename     = ""
+	port           = ""
+	replicaof      = ""
+	master_replid  = ""
+	replicaConns   = make(map[net.Conn]struct{})
+	replicaConnsMu sync.Mutex
+	masterOffset   int64
+	replicaOffsets = make(map[net.Conn]int64)
+	pendingWaits   []waitReq
+	waitMu         sync.Mutex
+	dirFlag        *string
 )
+
+type waitReq struct {
+	reqOffset int64
+	numNeeded int
+	done      chan int
+	deadline  time.Time
+}
 
 func main() {
 	fmt.Println("Logs from your program will appear here!")
 	// Define flags
-	dirFlag := flag.String("dir", "", "Directory for RDB file")
+	dirFlag = flag.String("dir", "", "Directory for RDB file")
 	dbfilenameFlag := flag.String("dbfilename", "", "RDB filename")
 	portFlag := flag.String("port", "6379", "Port to listen on")
 	replicaFlag := flag.String("replicaof", "", "Master Redis Server")
@@ -38,7 +49,7 @@ func main() {
 	flag.Parse()
 
 	// Assign to global variables (if you want to keep using them)
-	dir = *dirFlag
+
 	dbfilename = *dbfilenameFlag
 	port = *portFlag
 	replicaof = *replicaFlag
@@ -46,12 +57,12 @@ func main() {
 		master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
 	}
 
-	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", dir, dbfilename, port)
+	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", *dirFlag, dbfilename, port)
 
 	// --- RDB loading for extensibility ---
-	if dir != "" && dbfilename != "" {
-		fmt.Println("Loading RDB file from ", dir, "/", dbfilename)
-		rdbPath := dir + "/" + dbfilename
+	if *dirFlag != "" && dbfilename != "" {
+		fmt.Println("Loading RDB file from ", *dirFlag, "/", dbfilename)
+		rdbPath := *dirFlag + "/" + dbfilename
 		if _, err := os.Stat(rdbPath); err == nil {
 			fmt.Println("RDB file found")
 			kv, exp, err := LoadRDBFile(rdbPath)
@@ -87,12 +98,12 @@ func main() {
 			fmt.Println("Error accepting connection: ", err.Error())
 			os.Exit(1)
 		}
+		fmt.Printf("[SERVER] Accepted connection from %v\n", conn.RemoteAddr())
 		go handleConnection(conn)
 	}
 }
 
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
 	// Check if we're running as a replica
@@ -130,7 +141,6 @@ func handleConnection(conn net.Conn) {
 			}
 		case "SET":
 			if len(commands) >= 3 {
-				// Set the key-value pair
 				db[commands[1]] = commands[2]
 				if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
 					db_expire_time, err := strconv.Atoi(commands[4])
@@ -141,11 +151,13 @@ func handleConnection(conn net.Conn) {
 						return
 					}
 					expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
-
 				}
 				if !isReplica {
 					conn.Write([]byte("+OK\r\n"))
 					propagateToReplicas(commands)
+					waitMu.Lock()
+					masterOffset += int64(len(encodeRESPArray(commands...)))
+					waitMu.Unlock()
 				}
 			} else {
 				// Error: SET requires at least two arguments
@@ -182,7 +194,7 @@ func handleConnection(conn net.Conn) {
 			}
 			key := commands[2]
 			if key == "dir" {
-				conn.Write([]byte(fmt.Sprintf("*2\r\n$3\r\ndir\r\n$%d\r\n%s\r\n", len(dir), dir)))
+				conn.Write([]byte(fmt.Sprintf("*2\r\n$3\r\ndir\r\n$%d\r\n%s\r\n", len((*dirFlag)), *dirFlag)))
 			} else if key == "dbfilename" {
 				conn.Write([]byte(fmt.Sprintf("*2\r\n$10\r\ndbfilename\r\n$%d\r\n%s\r\n", len(dbfilename), dbfilename)))
 			}
@@ -208,12 +220,10 @@ func handleConnection(conn net.Conn) {
 		case "INFO":
 			response := ""
 			if replicaof == "" {
+				master_repl_offset := 0 // Hardcoded to 0 for now
 				response = fmt.Sprintf("role:master master_replid:%s master_repl_offset:%d", master_replid, master_repl_offset)
 			} else {
 				response = "role:slave"
-			}
-			if replicaof != "" {
-
 			}
 
 			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(response), response)))
@@ -237,10 +247,137 @@ func handleConnection(conn net.Conn) {
 			replicaConnsMu.Lock()
 			replicaConns[conn] = struct{}{}
 			replicaConnsMu.Unlock()
+			// Start goroutine to read REPLCONF ACKs for this replica
+			go func(c net.Conn) {
+				defer c.Close()
+				fmt.Printf("[ACK-READER] Started for %v\n", c.RemoteAddr())
+				reader := bufio.NewReader(c)
+				for {
+					resp, err := parseRESPArray(reader)
+					if err != nil {
+						fmt.Printf("[ACK-READER] Connection closed for replica %v: %v\n", c.RemoteAddr(), err)
+						return // connection closed
+					}
+					fmt.Printf("[ACK-READER] Received from replica %v: %v\n", c.RemoteAddr(), resp)
+					if len(resp) >= 3 && strings.ToUpper(resp[0]) == "REPLCONF" && strings.ToUpper(resp[1]) == "ACK" {
+						offset, _ := strconv.ParseInt(resp[2], 10, 64)
+						fmt.Printf("[ACK-READER] Parsed ACK offset %d from replica %v\n", offset, c.RemoteAddr())
+						waitMu.Lock()
+						replicaOffsets[c] = offset
+						fmt.Printf("[ACK-READER] Updated replicaOffsets: %v\n", replicaOffsets)
+						// Check pendingWaits
+						for i := 0; i < len(pendingWaits); {
+							count := 0
+							for _, ro := range replicaOffsets {
+								if ro >= pendingWaits[i].reqOffset {
+									count++
+								}
+							}
+							if count >= pendingWaits[i].numNeeded {
+								fmt.Printf("[ACK-READER] Fulfilling WAIT: reqOffset=%d, numNeeded=%d, count=%d\n", pendingWaits[i].reqOffset, pendingWaits[i].numNeeded, count)
+								pendingWaits[i].done <- count
+								pendingWaits = append(pendingWaits[:i], pendingWaits[i+1:]...)
+							} else {
+								i++
+							}
+						}
+						fmt.Printf("[ACK-READER] Pending waits after check: %v\n", pendingWaits)
+						waitMu.Unlock()
+					}
+				}
+			}(conn)
+			return
 
 		case "WAIT":
-			msg := fmt.Sprintf(":%d\r\n", len(replicaConns))
-			conn.Write([]byte(msg))
+			if len(commands) != 3 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'wait' command\r\n"))
+				continue
+			}
+			numReplicas, err1 := strconv.Atoi(commands[1])
+			timeoutMs, err2 := strconv.Atoi(commands[2])
+			if err1 != nil || err2 != nil {
+				conn.Write([]byte("-ERR invalid arguments for 'wait' command\r\n"))
+				continue
+			}
+
+			// Send GETACK to each replica
+			replicaConnsMu.Lock()
+			for c := range replicaConns {
+				c.Write([]byte(encodeRESPArray("REPLCONF", "GETACK", "*")))
+			}
+			replicaConnsMu.Unlock()
+
+			// Snapshot the current master offset
+			waitMu.Lock()
+			reqOffset := masterOffset
+			var acked int
+			if reqOffset == 0 {
+				// No writes yet: count all connected replicas
+				replicaConnsMu.Lock()
+				acked = len(replicaConns)
+				fmt.Printf("REQOFFSEST WAS 0. SENDING %d ACKS", acked)
+				replicaConnsMu.Unlock()
+				waitMu.Unlock()
+				conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
+				continue
+			} else {
+				// Count only those that have acknowledged this offset
+				for _, off := range replicaOffsets {
+					if off >= reqOffset {
+						acked++
+					}
+				}
+			}
+			fmt.Printf("[WAIT] reqOffset=%d, numReplicas=%d, acked=%d, replicaOffsets=%v\n", reqOffset, numReplicas, acked, replicaOffsets)
+			fmt.Printf("[WAIT] replicaOffsets keys: ")
+			for k := range replicaOffsets {
+				fmt.Printf("%v ", k.RemoteAddr())
+			}
+			fmt.Println()
+			waitMu.Unlock()
+
+			if acked >= numReplicas {
+				conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
+				continue
+			}
+
+			// Otherwise, wait for more ACKs or timeout
+			fmt.Println("[WAIT] waiting for more ACKs")
+			done := make(chan int, 1)
+			wr := waitReq{reqOffset, numReplicas, done, time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)}
+			waitMu.Lock()
+			pendingWaits = append(pendingWaits, wr)
+			waitMu.Unlock()
+
+			select {
+			case n := <-done:
+				fmt.Println("[WAIT] done")
+				conn.Write([]byte(fmt.Sprintf(":%d\r\n", n)))
+			case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+				// On timeout, remove from pendingWaits and return current count
+				fmt.Println("[WAIT] timeout")
+				waitMu.Lock()
+				// Remove wr from pendingWaits
+				for i, w := range pendingWaits {
+					if w == wr {
+						fmt.Printf("[WAIT] removing wr %v\n", wr)
+						pendingWaits = append(pendingWaits[:i], pendingWaits[i+1:]...)
+						break
+					}
+				}
+				// Re-count
+				acked := 0
+				fmt.Println("[WAIT] Recounting ACKs")
+				for _, off := range replicaOffsets {
+					if off >= reqOffset {
+						acked++
+						fmt.Printf("[WAIT] Counted %d ACKs\n", acked)
+					}
+				}
+				waitMu.Unlock()
+				fmt.Printf("[WAIT] counted %d ACKs\n", acked)
+				conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
+			}
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))

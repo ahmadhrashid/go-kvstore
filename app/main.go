@@ -226,11 +226,13 @@ func handleConnection(conn net.Conn) {
 				fields[commands[i]] = commands[i+1]
 			}
 			parts := strings.Split(id, "-")
-			if len(parts) != 2 {
+			if len(parts) == 1 && parts[0] == "*" {
+				generateEntryID(&id, key)
+			} else if len(parts) != 2 {
 				conn.Write([]byte("-ERR Invalid ID"))
 				continue
 			} else if parts[1] == "*" {
-				expandSequenceNum(&id, key)
+				generateSequenceNum(&id, key)
 			}
 
 			// append to stream (thread‑safe)
@@ -759,7 +761,7 @@ func propagateToReplicas(commands []string) {
 	}
 }
 
-func expandSequenceNum(idPtr *string, key string) {
+func generateSequenceNum(idPtr *string, key string) {
 	streamList := streams[key]
 	maxSeq := -1
 	timePart := strings.Split(*idPtr, "-")[0]
@@ -777,4 +779,10 @@ func expandSequenceNum(idPtr *string, key string) {
 	} else {
 		*idPtr = timePart + "-" + strconv.Itoa(maxSeq+1)
 	}
+}
+
+func generateEntryID(idPtr *string, key string) {
+	timePart := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	*idPtr = timePart + "-" + "*"
+	generateSequenceNum(idPtr, key)
 }

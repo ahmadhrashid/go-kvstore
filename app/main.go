@@ -29,6 +29,8 @@ var (
 	waitMu         sync.Mutex
 	dirFlag        *string
 	isReplica      bool
+	streams        = make(map[string]stream)
+	streamsMu      sync.Mutex
 )
 
 type waitReq struct {
@@ -36,6 +38,11 @@ type waitReq struct {
 	numNeeded int
 	done      chan int
 	deadline  time.Time
+}
+
+type stream struct {
+	ID     string
+	Fields map[string]string
 }
 
 func main() {
@@ -196,11 +203,35 @@ func handleConnection(conn net.Conn) {
 		case "TYPE":
 			key := commands[1]
 			val, exists := getValue(key)
-			if !exists {
+			streamsMu.Lock()
+			_, isStream := streams[key]
+			streamsMu.Unlock()
+			if !exists && !isStream {
 				conn.Write([]byte("+none\r\n"))
+			} else if isStream {
+				conn.Write([]byte("+stream\r\n"))
 			} else {
 				conn.Write([]byte(fmt.Sprintf("+%T\r\n", val)))
 			}
+
+		case "XADD":
+			if len(commands) < 5 || (len(commands)-3)%2 != 0 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'xadd' command\r\n"))
+				return
+			}
+			key, id := commands[1], commands[2]
+			fields := make(map[string]string, (len(commands)-3)/2)
+			for i := 3; i < len(commands); i += 2 {
+				fields[commands[i]] = commands[i+1]
+			}
+
+			// append to stream (thread‑safe)
+			streamsMu.Lock()
+			streams[key] = stream{ID: id, Fields: fields}
+			streamsMu.Unlock()
+
+			// reply with the ID as a RESP bulk string
+			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
 
 		default:
 			// Unknown command

@@ -145,15 +145,8 @@ func handleConnection(conn net.Conn) {
 		case "GET":
 			if len(commands) >= 2 {
 				key := commands[1]
-				val, exists := db[key]
-				expiry, has_expiry := expiry_db[key]
-				if has_expiry && time.Now().After(expiry) {
-					// Key expired, delete it
-					delete(db, key)
-					delete(expiry_db, key)
-					exists = false // Mark as not existing after deletion
-					conn.Write([]byte("$-1\r\n"))
-				} else if !exists {
+				val, exists := getValue(key)
+				if !exists {
 					conn.Write([]byte("$-1\r\n"))
 				} else {
 					response := fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)
@@ -199,6 +192,15 @@ func handleConnection(conn net.Conn) {
 
 		case "WAIT":
 			handleWait(conn, commands)
+
+		case "TYPE":
+			key := commands[1]
+			val, exists := getValue(key)
+			if !exists {
+				conn.Write([]byte("+none\r\n"))
+			} else {
+				conn.Write([]byte(fmt.Sprintf("+%T\r\n", val)))
+			}
 
 		default:
 			// Unknown command
@@ -402,6 +404,22 @@ func handleWait(conn net.Conn, commands []string) {
 		fmt.Printf("[WAIT] counted %d ACKs\n", acked)
 		conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
 	}
+
+}
+
+func getValue(key string) (string, bool) {
+	val, exists := db[key]
+	expiry, has_expiry := expiry_db[key]
+	if has_expiry && time.Now().After(expiry) {
+		// Key expired, delete it
+		delete(db, key)
+		delete(expiry_db, key)
+		exists = false // Mark as not existing after deletion
+	}
+	if !exists {
+		return "", false
+	}
+	return val, exists
 
 }
 

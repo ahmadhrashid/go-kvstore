@@ -29,7 +29,7 @@ var (
 	waitMu         sync.Mutex
 	dirFlag        *string
 	isReplica      bool
-	streams        = make(map[string]stream)
+	streams        = make(map[string][]stream)
 	streamsMu      sync.Mutex
 )
 
@@ -41,8 +41,9 @@ type waitReq struct {
 }
 
 type stream struct {
-	ID     string
-	Fields map[string]string
+	ID        string
+	Fields    map[string]string
+	prevEntry string
 }
 
 func main() {
@@ -227,11 +228,45 @@ func handleConnection(conn net.Conn) {
 
 			// append to stream (thread‑safe)
 			streamsMu.Lock()
-			streams[key] = stream{ID: id, Fields: fields}
-			streamsMu.Unlock()
+			_, exists := streams[key]
+			if id <= "0-0" {
+				streamsMu.Unlock()
+				conn.Write([]byte("-ERR The ID specified in XADD must be greater than 0-0\r\n"))
+			} else if exists && id <= streams[key][len(streams[key])-1].ID {
+				streamsMu.Unlock()
+				conn.Write([]byte("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"))
+			} else {
+				streams[key] = append(streams[key], stream{
+					ID:     id,
+					Fields: fields,
+				})
+				streamsMu.Unlock()
+				// reply with the ID as a RESP bulk string
+				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
+			}
+			// if !exists && id > "0-0" {
+			// 	fmt.Println("FIRST STREAM")
+			// 	streams[key] = append(streams[key], stream{
+			// 		ID:     id,
+			// 		Fields: fields,
+			// 	})
+			// 	streamsMu.Unlock()
+			// 	// reply with the ID as a RESP bulk string
+			// 	conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
+			// } else if exists && id > streams[key][len(streams[key])-1].ID {
+			// 	fmt.Printf("ID > PREV_ID, %s > %s", id, streams[key][len(streams)-1].ID)
+			// 	streams[key] = append(streams[key], stream{
+			// 		ID:     id,
+			// 		Fields: fields,
+			// 	})
+			// 	streamsMu.Unlock()
 
-			// reply with the ID as a RESP bulk string
-			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
+			// 	// reply with the ID as a RESP bulk string
+			// 	conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
+			// } else {
+			// 	conn.Write([]byte("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"))
+			// 	streamsMu.Unlock()
+			// }
 
 		default:
 			// Unknown command

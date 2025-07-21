@@ -28,6 +28,7 @@ var (
 	pendingWaits   []waitReq
 	waitMu         sync.Mutex
 	dirFlag        *string
+	isReplica      bool
 )
 
 type waitReq struct {
@@ -107,7 +108,7 @@ func handleConnection(conn net.Conn) {
 	reader := bufio.NewReader(conn)
 
 	// Check if we're running as a replica
-	isReplica := replicaof != ""
+	isReplica = replicaof != ""
 
 	for {
 		// Parse the RESP array
@@ -140,32 +141,7 @@ func handleConnection(conn net.Conn) {
 				conn.Write([]byte("-ERR wrong number of arguments for 'echo' command\r\n"))
 			}
 		case "SET":
-			if len(commands) >= 3 {
-				db[commands[1]] = commands[2]
-				if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
-					db_expire_time, err := strconv.Atoi(commands[4])
-					if err != nil {
-						if !isReplica {
-							conn.Write([]byte("-ERR invalid expiration time\r\n"))
-						}
-						return
-					}
-					expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
-				}
-				if !isReplica {
-					conn.Write([]byte("+OK\r\n"))
-					propagateToReplicas(commands)
-					waitMu.Lock()
-					masterOffset += int64(len(encodeRESPArray(commands...)))
-					waitMu.Unlock()
-				}
-			} else {
-				// Error: SET requires at least two arguments
-				if !isReplica {
-					conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
-				}
-			}
-
+			handleSet(conn, commands)
 		case "GET":
 			if len(commands) >= 2 {
 				key := commands[1]
@@ -203,20 +179,7 @@ func handleConnection(conn net.Conn) {
 				conn.Write([]byte("-ERR wrong number of arguments for 'keys' command\r\n"))
 				continue
 			}
-			pattern := commands[1]
-			keys := make([]string, 0)
-			if pattern == "*" {
-				for k := range db {
-					keys = append(keys, k)
-				}
-			}
-			if len(keys) == 0 {
-				conn.Write([]byte("*0\r\n"))
-			}
-			conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(keys))))
-			for _, k := range keys {
-				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k)))
-			}
+			handleKeys(conn, commands)
 		case "INFO":
 			response := ""
 			if replicaof == "" {
@@ -231,158 +194,215 @@ func handleConnection(conn net.Conn) {
 		case "REPLCONF":
 			conn.Write([]byte("+OK\r\n"))
 		case "PSYNC":
-			// Respond with +FULLRESYNC <REPL_ID> 0\r\n
-			response := fmt.Sprintf("+FULLRESYNC %s 0\r\n", master_replid)
-			conn.Write([]byte(response))
-			// Send empty RDB file as $<length>\r\n<contents>
-			var emptyRDB = []byte{
-				0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31,
-				0xFA, 0x09, 0x72, 0x65, 0x64, 0x69, 0x73, 0x2D, 0x76, 0x65, 0x72,
-				0x06, 0x36, 0x2E, 0x30, 0x2E, 0x31, 0x36,
-				0xFF, 0x89, 0x3B, 0xB7, 0x4E, 0xF8, 0x0F, 0x77, 0x19,
-			}
-			rdbHeader := fmt.Sprintf("$%d\r\n", len(emptyRDB))
-			conn.Write([]byte(rdbHeader))
-			conn.Write(emptyRDB)
-			replicaConnsMu.Lock()
-			replicaConns[conn] = struct{}{}
-			replicaConnsMu.Unlock()
-			// Start goroutine to read REPLCONF ACKs for this replica
-			go func(c net.Conn) {
-				defer c.Close()
-				fmt.Printf("[ACK-READER] Started for %v\n", c.RemoteAddr())
-				reader := bufio.NewReader(c)
-				for {
-					resp, err := parseRESPArray(reader)
-					if err != nil {
-						fmt.Printf("[ACK-READER] Connection closed for replica %v: %v\n", c.RemoteAddr(), err)
-						return // connection closed
-					}
-					fmt.Printf("[ACK-READER] Received from replica %v: %v\n", c.RemoteAddr(), resp)
-					if len(resp) >= 3 && strings.ToUpper(resp[0]) == "REPLCONF" && strings.ToUpper(resp[1]) == "ACK" {
-						offset, _ := strconv.ParseInt(resp[2], 10, 64)
-						fmt.Printf("[ACK-READER] Parsed ACK offset %d from replica %v\n", offset, c.RemoteAddr())
-						waitMu.Lock()
-						replicaOffsets[c] = offset
-						fmt.Printf("[ACK-READER] Updated replicaOffsets: %v\n", replicaOffsets)
-						// Check pendingWaits
-						for i := 0; i < len(pendingWaits); {
-							count := 0
-							for _, ro := range replicaOffsets {
-								if ro >= pendingWaits[i].reqOffset {
-									count++
-								}
-							}
-							if count >= pendingWaits[i].numNeeded {
-								fmt.Printf("[ACK-READER] Fulfilling WAIT: reqOffset=%d, numNeeded=%d, count=%d\n", pendingWaits[i].reqOffset, pendingWaits[i].numNeeded, count)
-								pendingWaits[i].done <- count
-								pendingWaits = append(pendingWaits[:i], pendingWaits[i+1:]...)
-							} else {
-								i++
-							}
-						}
-						fmt.Printf("[ACK-READER] Pending waits after check: %v\n", pendingWaits)
-						waitMu.Unlock()
-					}
-				}
-			}(conn)
+			handlePSYNC(conn, commands)
 			return
 
 		case "WAIT":
-			if len(commands) != 3 {
-				conn.Write([]byte("-ERR wrong number of arguments for 'wait' command\r\n"))
-				continue
-			}
-			numReplicas, err1 := strconv.Atoi(commands[1])
-			timeoutMs, err2 := strconv.Atoi(commands[2])
-			if err1 != nil || err2 != nil {
-				conn.Write([]byte("-ERR invalid arguments for 'wait' command\r\n"))
-				continue
-			}
+			handleWait(conn, commands)
 
-			// Send GETACK to each replica
-			replicaConnsMu.Lock()
-			for c := range replicaConns {
-				c.Write([]byte(encodeRESPArray("REPLCONF", "GETACK", "*")))
-			}
-			replicaConnsMu.Unlock()
-
-			// Snapshot the current master offset
-			waitMu.Lock()
-			reqOffset := masterOffset
-			var acked int
-			if reqOffset == 0 {
-				// No writes yet: count all connected replicas
-				replicaConnsMu.Lock()
-				acked = len(replicaConns)
-				fmt.Printf("REQOFFSEST WAS 0. SENDING %d ACKS", acked)
-				replicaConnsMu.Unlock()
-				waitMu.Unlock()
-				conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
-				continue
-			} else {
-				// Count only those that have acknowledged this offset
-				for _, off := range replicaOffsets {
-					if off >= reqOffset {
-						acked++
-					}
-				}
-			}
-			fmt.Printf("[WAIT] reqOffset=%d, numReplicas=%d, acked=%d, replicaOffsets=%v\n", reqOffset, numReplicas, acked, replicaOffsets)
-			fmt.Printf("[WAIT] replicaOffsets keys: ")
-			for k := range replicaOffsets {
-				fmt.Printf("%v ", k.RemoteAddr())
-			}
-			fmt.Println()
-			waitMu.Unlock()
-
-			if acked >= numReplicas {
-				conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
-				continue
-			}
-
-			// Otherwise, wait for more ACKs or timeout
-			fmt.Println("[WAIT] waiting for more ACKs")
-			done := make(chan int, 1)
-			wr := waitReq{reqOffset, numReplicas, done, time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)}
-			waitMu.Lock()
-			pendingWaits = append(pendingWaits, wr)
-			waitMu.Unlock()
-
-			select {
-			case n := <-done:
-				fmt.Println("[WAIT] done")
-				conn.Write([]byte(fmt.Sprintf(":%d\r\n", n)))
-			case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
-				// On timeout, remove from pendingWaits and return current count
-				fmt.Println("[WAIT] timeout")
-				waitMu.Lock()
-				// Remove wr from pendingWaits
-				for i, w := range pendingWaits {
-					if w == wr {
-						fmt.Printf("[WAIT] removing wr %v\n", wr)
-						pendingWaits = append(pendingWaits[:i], pendingWaits[i+1:]...)
-						break
-					}
-				}
-				// Re-count
-				acked := 0
-				fmt.Println("[WAIT] Recounting ACKs")
-				for _, off := range replicaOffsets {
-					if off >= reqOffset {
-						acked++
-						fmt.Printf("[WAIT] Counted %d ACKs\n", acked)
-					}
-				}
-				waitMu.Unlock()
-				fmt.Printf("[WAIT] counted %d ACKs\n", acked)
-				conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
-			}
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
 		}
 	}
+}
+
+func handleSet(conn net.Conn, commands []string) {
+	if len(commands) >= 3 {
+		db[commands[1]] = commands[2]
+		if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
+			db_expire_time, err := strconv.Atoi(commands[4])
+			if err != nil {
+				if !isReplica {
+					conn.Write([]byte("-ERR invalid expiration time\r\n"))
+				}
+				return
+			}
+			expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
+		}
+		if !isReplica {
+			conn.Write([]byte("+OK\r\n"))
+			propagateToReplicas(commands)
+			waitMu.Lock()
+			masterOffset += int64(len(encodeRESPArray(commands...)))
+			waitMu.Unlock()
+		}
+	} else {
+		// Error: SET requires at least two arguments
+		if !isReplica {
+			conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
+		}
+	}
+
+}
+
+func handleKeys(conn net.Conn, commands []string) {
+
+	pattern := commands[1]
+	keys := make([]string, 0)
+	if pattern == "*" {
+		for k := range db {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		conn.Write([]byte("*0\r\n"))
+	}
+	conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(keys))))
+	for _, k := range keys {
+		conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k)))
+	}
+}
+
+func handlePSYNC(conn net.Conn, commands []string) {
+	// Respond with +FULLRESYNC <REPL_ID> 0\r\n
+	response := fmt.Sprintf("+FULLRESYNC %s 0\r\n", master_replid)
+	conn.Write([]byte(response))
+	// Send empty RDB file as $<length>\r\n<contents>
+	var emptyRDB = []byte{
+		0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31,
+		0xFA, 0x09, 0x72, 0x65, 0x64, 0x69, 0x73, 0x2D, 0x76, 0x65, 0x72,
+		0x06, 0x36, 0x2E, 0x30, 0x2E, 0x31, 0x36,
+		0xFF, 0x89, 0x3B, 0xB7, 0x4E, 0xF8, 0x0F, 0x77, 0x19,
+	}
+	rdbHeader := fmt.Sprintf("$%d\r\n", len(emptyRDB))
+	conn.Write([]byte(rdbHeader))
+	conn.Write(emptyRDB)
+	replicaConnsMu.Lock()
+	replicaConns[conn] = struct{}{}
+	replicaConnsMu.Unlock()
+	// Start goroutine to read REPLCONF ACKs for this replica
+	go func(c net.Conn) {
+		defer c.Close()
+		fmt.Printf("[ACK-READER] Started for %v\n", c.RemoteAddr())
+		reader := bufio.NewReader(c)
+		for {
+			resp, err := parseRESPArray(reader)
+			if err != nil {
+				fmt.Printf("[ACK-READER] Connection closed for replica %v: %v\n", c.RemoteAddr(), err)
+				return // connection closed
+			}
+			fmt.Printf("[ACK-READER] Received from replica %v: %v\n", c.RemoteAddr(), resp)
+			if len(resp) >= 3 && strings.ToUpper(resp[0]) == "REPLCONF" && strings.ToUpper(resp[1]) == "ACK" {
+				offset, _ := strconv.ParseInt(resp[2], 10, 64)
+				fmt.Printf("[ACK-READER] Parsed ACK offset %d from replica %v\n", offset, c.RemoteAddr())
+				waitMu.Lock()
+				replicaOffsets[c] = offset
+				fmt.Printf("[ACK-READER] Updated replicaOffsets: %v\n", replicaOffsets)
+				// Check pendingWaits
+				for i := 0; i < len(pendingWaits); {
+					count := 0
+					for _, ro := range replicaOffsets {
+						if ro >= pendingWaits[i].reqOffset {
+							count++
+						}
+					}
+					if count >= pendingWaits[i].numNeeded {
+						fmt.Printf("[ACK-READER] Fulfilling WAIT: reqOffset=%d, numNeeded=%d, count=%d\n", pendingWaits[i].reqOffset, pendingWaits[i].numNeeded, count)
+						pendingWaits[i].done <- count
+						pendingWaits = append(pendingWaits[:i], pendingWaits[i+1:]...)
+					} else {
+						i++
+					}
+				}
+				fmt.Printf("[ACK-READER] Pending waits after check: %v\n", pendingWaits)
+				waitMu.Unlock()
+			}
+		}
+	}(conn)
+}
+
+func handleWait(conn net.Conn, commands []string) {
+	if len(commands) != 3 {
+		conn.Write([]byte("-ERR wrong number of arguments for 'wait' command\r\n"))
+		return
+	}
+	numReplicas, err1 := strconv.Atoi(commands[1])
+	timeoutMs, err2 := strconv.Atoi(commands[2])
+	if err1 != nil || err2 != nil {
+		conn.Write([]byte("-ERR invalid arguments for 'wait' command\r\n"))
+		return
+	}
+
+	// Send GETACK to each replica
+	replicaConnsMu.Lock()
+	for c := range replicaConns {
+		c.Write([]byte(encodeRESPArray("REPLCONF", "GETACK", "*")))
+	}
+	replicaConnsMu.Unlock()
+
+	// Snapshot the current master offset
+	waitMu.Lock()
+	reqOffset := masterOffset
+	var acked int
+	if reqOffset == 0 {
+		// No writes yet: count all connected replicas
+		replicaConnsMu.Lock()
+		acked = len(replicaConns)
+		fmt.Printf("REQOFFSEST WAS 0. SENDING %d ACKS", acked)
+		replicaConnsMu.Unlock()
+		waitMu.Unlock()
+		conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
+		return
+	} else {
+		// Count only those that have acknowledged this offset
+		for _, off := range replicaOffsets {
+			if off >= reqOffset {
+				acked++
+			}
+		}
+	}
+	fmt.Printf("[WAIT] reqOffset=%d, numReplicas=%d, acked=%d, replicaOffsets=%v\n", reqOffset, numReplicas, acked, replicaOffsets)
+	fmt.Printf("[WAIT] replicaOffsets keys: ")
+	for k := range replicaOffsets {
+		fmt.Printf("%v ", k.RemoteAddr())
+	}
+	fmt.Println()
+	waitMu.Unlock()
+
+	if acked >= numReplicas {
+		conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
+		return
+	}
+
+	// Otherwise, wait for more ACKs or timeout
+	fmt.Println("[WAIT] waiting for more ACKs")
+	done := make(chan int, 1)
+	wr := waitReq{reqOffset, numReplicas, done, time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)}
+	waitMu.Lock()
+	pendingWaits = append(pendingWaits, wr)
+	waitMu.Unlock()
+
+	select {
+	case n := <-done:
+		fmt.Println("[WAIT] done")
+		conn.Write([]byte(fmt.Sprintf(":%d\r\n", n)))
+	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+		// On timeout, remove from pendingWaits and return current count
+		fmt.Println("[WAIT] timeout")
+		waitMu.Lock()
+		// Remove wr from pendingWaits
+		for i, w := range pendingWaits {
+			if w == wr {
+				fmt.Printf("[WAIT] removing wr %v\n", wr)
+				pendingWaits = append(pendingWaits[:i], pendingWaits[i+1:]...)
+				break
+			}
+		}
+		// Re-count
+		acked := 0
+		fmt.Println("[WAIT] Recounting ACKs")
+		for _, off := range replicaOffsets {
+			if off >= reqOffset {
+				acked++
+				fmt.Printf("[WAIT] Counted %d ACKs\n", acked)
+			}
+		}
+		waitMu.Unlock()
+		fmt.Printf("[WAIT] counted %d ACKs\n", acked)
+		conn.Write([]byte(fmt.Sprintf(":%d\r\n", acked)))
+	}
+
 }
 
 func parseRESPArray(reader *bufio.Reader) ([]string, error) {

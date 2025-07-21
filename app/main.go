@@ -218,12 +218,19 @@ func handleConnection(conn net.Conn) {
 		case "XADD":
 			if len(commands) < 5 || (len(commands)-3)%2 != 0 {
 				conn.Write([]byte("-ERR wrong number of arguments for 'xadd' command\r\n"))
-				return
+				continue
 			}
 			key, id := commands[1], commands[2]
 			fields := make(map[string]string, (len(commands)-3)/2)
 			for i := 3; i < len(commands); i += 2 {
 				fields[commands[i]] = commands[i+1]
+			}
+			parts := strings.Split(id, "-")
+			if len(parts) != 2 {
+				conn.Write([]byte("-ERR Invalid ID"))
+				continue
+			} else if parts[1] == "*" {
+				expandSequenceNum(&id, key)
 			}
 
 			// append to stream (thread‑safe)
@@ -749,5 +756,25 @@ func propagateToReplicas(commands []string) {
 			c.Close()
 			delete(replicaConns, c)
 		}
+	}
+}
+
+func expandSequenceNum(idPtr *string, key string) {
+	streamList := streams[key]
+	maxSeq := -1
+	timePart := strings.Split(*idPtr, "-")[0]
+	for _, entry := range streamList {
+		parts := strings.SplitN(entry.ID, "-", 2)
+		if len(parts) != 2 || parts[0] != timePart {
+			continue
+		}
+		if seq, err := strconv.Atoi(parts[1]); err == nil && seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	if timePart == strconv.Itoa(0) && maxSeq == -1 {
+		*idPtr = timePart + "-" + strconv.Itoa(1)
+	} else {
+		*idPtr = timePart + "-" + strconv.Itoa(maxSeq+1)
 	}
 }

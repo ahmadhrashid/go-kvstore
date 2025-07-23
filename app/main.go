@@ -29,7 +29,7 @@ var (
 	waitMu         sync.Mutex
 	dirFlag        *string
 	isReplica      bool
-	streams        = make(map[string][]stream)
+	streams        = make(map[string][]streamEntry)
 	streamsMu      sync.Mutex
 )
 
@@ -40,10 +40,9 @@ type waitReq struct {
 	deadline  time.Time
 }
 
-type stream struct {
-	ID        string
-	Fields    map[string]string
-	prevEntry string
+type streamEntry struct {
+	ID     string
+	Fields map[string]string
 }
 
 func main() {
@@ -245,7 +244,7 @@ func handleConnection(conn net.Conn) {
 				streamsMu.Unlock()
 				conn.Write([]byte("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"))
 			} else {
-				streams[key] = append(streams[key], stream{
+				streams[key] = append(streams[key], streamEntry{
 					ID:     id,
 					Fields: fields,
 				})
@@ -253,30 +252,35 @@ func handleConnection(conn net.Conn) {
 				// reply with the ID as a RESP bulk string
 				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
 			}
-			// if !exists && id > "0-0" {
-			// 	fmt.Println("FIRST STREAM")
-			// 	streams[key] = append(streams[key], stream{
-			// 		ID:     id,
-			// 		Fields: fields,
-			// 	})
-			// 	streamsMu.Unlock()
-			// 	// reply with the ID as a RESP bulk string
-			// 	conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
-			// } else if exists && id > streams[key][len(streams[key])-1].ID {
-			// 	fmt.Printf("ID > PREV_ID, %s > %s", id, streams[key][len(streams)-1].ID)
-			// 	streams[key] = append(streams[key], stream{
-			// 		ID:     id,
-			// 		Fields: fields,
-			// 	})
-			// 	streamsMu.Unlock()
 
-			// 	// reply with the ID as a RESP bulk string
-			// 	conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
-			// } else {
-			// 	conn.Write([]byte("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"))
-			// 	streamsMu.Unlock()
-			// }
+		case "XRANGE":
+			if len(commands) != 4 {
+				conn.Write([]byte("-ERR invalid number of commands"))
+				break
+			}
+			key, startID, endID := commands[1], commands[2], commands[3]
+			streamList := streams[key]
 
+			var resp strings.Builder
+
+			var inRange []streamEntry
+			for _, entry := range streamList {
+				if startID <= entry.ID && entry.ID <= endID {
+					inRange = append(inRange, entry)
+				}
+			}
+			resp.WriteString(fmt.Sprintf("*%d\r\n", len(inRange)))
+			for _, entry := range inRange {
+
+				resp.WriteString("*2\r\n")
+				resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(entry.ID), entry.ID))
+				resp.WriteString(fmt.Sprintf("*%d\r\n", len(entry.Fields)*2))
+				for k, v := range entry.Fields {
+					resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k))
+					resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
+				}
+			}
+			conn.Write([]byte(resp.String()))
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))

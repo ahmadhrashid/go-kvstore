@@ -260,12 +260,22 @@ func handleConnection(conn net.Conn) {
 			}
 			key, startID, endID := commands[1], commands[2], commands[3]
 			streamList := streams[key]
+			startFlag := false
+			endFlag := false
+
+			if startID == "-" {
+				startFlag = true
+			}
+
+			if endID == "+" {
+				endFlag = true
+			}
 
 			var resp strings.Builder
 
 			var inRange []streamEntry
 			for _, entry := range streamList {
-				if startID <= entry.ID && entry.ID <= endID {
+				if (startID <= entry.ID || startFlag) && (entry.ID <= endID || endFlag) {
 					inRange = append(inRange, entry)
 				}
 			}

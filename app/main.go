@@ -293,50 +293,89 @@ func handleConnection(conn net.Conn) {
 			conn.Write([]byte(resp.String()))
 		case "XREAD":
 
-			if len(commands) != 4 || strings.ToLower(commands[1]) != "streams" {
+			if len(commands) < 4 || strings.ToLower(commands[1]) != "streams" || len(commands)%2 != 0 {
 				conn.Write([]byte("-ERR wrong number of arguments for 'xread' command\r\n"))
 				continue
 			}
-			streamKey := commands[2]
-			startID := commands[3]
-
-			streamsMu.Lock()
-			streamList, exists := streams[streamKey]
-			streamsMu.Unlock()
-			if !exists {
-
-				conn.Write([]byte("*0\r\n"))
-				continue
+			numStreams := (len(commands) - 2) / 2
+			var streamKeys []string
+			var startIDs []string
+			for i := range numStreams {
+				streamKeys = append(streamKeys, commands[i+2])
+				startIDs = append(startIDs, commands[i+2+numStreams])
 			}
-
-			var entries []streamEntry
-			for _, entry := range streamList {
-				if entry.ID > startID {
-					entries = append(entries, entry)
-				}
-			}
-
-			if len(entries) == 0 {
-
-				conn.Write([]byte("*0\r\n"))
-				continue
-			}
-
 			var resp strings.Builder
-			resp.WriteString("*1\r\n") // one stream
-			resp.WriteString("*2\r\n") // [streamKey, entries]
-			resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(streamKey), streamKey))
-			resp.WriteString(fmt.Sprintf("*%d\r\n", len(entries))) // number of entries
-			for _, entry := range entries {
-				resp.WriteString("*2\r\n") // [id, [fields...]]
-				resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(entry.ID), entry.ID))
-				resp.WriteString(fmt.Sprintf("*%d\r\n", len(entry.Fields)*2))
-				for k, v := range entry.Fields {
-					resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k))
-					resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
+			resp.WriteString(fmt.Sprintf("*%d\r\n", numStreams))
+			for i, streamKey := range streamKeys {
+				streamsMu.Lock()
+				streamList := streams[streamKey]
+				streamsMu.Unlock()
+
+				var entries []streamEntry
+				for _, entry := range streamList {
+					if entry.ID > startIDs[i] {
+						entries = append(entries, entry)
+					}
 				}
+				if len(entries) == 0 {
+					resp.WriteString("*0\r\n")
+					continue
+				}
+				resp.WriteString("*2\r\n")
+				resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(streamKey), streamKey))
+				resp.WriteString(fmt.Sprintf("*%d\r\n", len(entries))) // number of entries
+				for _, entry := range entries {
+					resp.WriteString("*2\r\n") // [id, [fields...]]
+					resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(entry.ID), entry.ID))
+					resp.WriteString(fmt.Sprintf("*%d\r\n", len(entry.Fields)*2))
+					for k, v := range entry.Fields {
+						resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k))
+						resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
+					}
+				}
+
 			}
 			conn.Write([]byte(resp.String()))
+			// streamKey := commands[2]
+			// startID := commands[3]
+
+			// streamsMu.Lock()
+			// streamList, exists := streams[streamKey]
+			// streamsMu.Unlock()
+			// if !exists {
+
+			// 	conn.Write([]byte("*0\r\n"))
+			// 	continue
+			// }
+
+			// var entries []streamEntry
+			// for _, entry := range streamList {
+			// 	if entry.ID > startID {
+			// 		entries = append(entries, entry)
+			// 	}
+			// }
+
+			// if len(entries) == 0 {
+
+			// 	conn.Write([]byte("*0\r\n"))
+			// 	continue
+			// }
+
+			// var resp strings.Builder
+			// resp.WriteString("*1\r\n") // one stream
+			// resp.WriteString("*2\r\n") // [streamKey, entries]
+			// resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(streamKey), streamKey))
+			// resp.WriteString(fmt.Sprintf("*%d\r\n", len(entries))) // number of entries
+			// for _, entry := range entries {
+			// 	resp.WriteString("*2\r\n") // [id, [fields...]]
+			// 	resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(entry.ID), entry.ID))
+			// 	resp.WriteString(fmt.Sprintf("*%d\r\n", len(entry.Fields)*2))
+			// 	for k, v := range entry.Fields {
+			// 		resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k))
+			// 		resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
+			// 	}
+			// }
+			// conn.Write([]byte(resp.String()))
 		default:
 			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))

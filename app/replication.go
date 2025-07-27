@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// handlePSYNC handles the PSYNC command
 func handlePSYNC(conn net.Conn, commands []string) {
 	response := fmt.Sprintf("+FULLRESYNC %s 0\r\n", masterReplID)
 	conn.Write([]byte(response))
@@ -68,8 +67,7 @@ func handlePSYNC(conn net.Conn, commands []string) {
 	}(conn)
 }
 
-// handleWait handles the WAIT command
-func handleWait(conn net.Conn, commands []string) {
+func handleWait(conn io.Writer, commands []string) {
 	if len(commands) != 3 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'wait' command\r\n"))
 		return

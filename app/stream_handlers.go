@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
-	"net"
+	"io"
 	"strconv"
 	"strings"
 	"time"
 )
 
-func handleXAdd(conn net.Conn, commands []string) {
+func handleXAdd(conn io.Writer, commands []string) {
 	if len(commands) < 5 || (len(commands)-3)%2 != 0 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'xadd' command\r\n"))
 		return
@@ -49,7 +49,7 @@ func handleXAdd(conn net.Conn, commands []string) {
 	}
 }
 
-func handleXRange(conn net.Conn, commands []string) {
+func handleXRange(conn io.Writer, commands []string) {
 	if len(commands) != 4 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'xrange' command\r\n"))
 		return
@@ -81,8 +81,7 @@ func handleXRange(conn net.Conn, commands []string) {
 	conn.Write([]byte(resp.String()))
 }
 
-// handleBlockingXRead handles blocking XREAD command
-func handleBlockingXRead(conn net.Conn, streamKeys []string, lastIDs []string, timeoutMs int) {
+func handleBlockingXRead(conn io.Writer, streamKeys []string, lastIDs []string, timeoutMs int) {
 	// First check if there are already new entries
 	hasNewData := false
 	for i, streamKey := range streamKeys {
@@ -238,7 +237,7 @@ func handleBlockingXRead(conn net.Conn, streamKeys []string, lastIDs []string, t
 	}()
 }
 
-func handleNonBlockingXRead(conn net.Conn, streamKeys []string, lastIDs []string) {
+func handleNonBlockingXRead(conn io.Writer, streamKeys []string, lastIDs []string) {
 	var resp strings.Builder
 	resp.WriteString(fmt.Sprintf("*%d\r\n", len(streamKeys)))
 
@@ -268,7 +267,7 @@ func handleNonBlockingXRead(conn net.Conn, streamKeys []string, lastIDs []string
 	conn.Write([]byte(resp.String()))
 }
 
-func handleXRead(conn net.Conn, commands []string) {
+func handleXRead(conn io.Writer, commands []string) {
 	if len(commands) < 4 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'xread' command\r\n"))
 		return

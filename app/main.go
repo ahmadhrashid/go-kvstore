@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -39,6 +40,10 @@ var (
 	waitingXReadsMu   sync.Mutex
 	streamNotifiers   = make(map[string]chan struct{})
 	streamNotifiersMu sync.Mutex
+
+	//Transactions
+	inMulti    = false
+	multiQueue [][]string
 )
 
 type waitReq struct {
@@ -49,7 +54,7 @@ type waitReq struct {
 }
 
 type waitingXRead struct {
-	conn    net.Conn
+	conn    io.Writer
 	streams []string
 	lastIDs []string
 	timeout time.Time
@@ -163,6 +168,28 @@ func handleConnection(conn net.Conn) {
 		}
 
 		command := strings.ToUpper(commands[0])
+
+		switch command {
+		case "MULTI":
+			handleMulti(conn, commands)
+			continue
+
+		case "DISCARD":
+			handleDiscard(conn, commands)
+			continue
+
+		case "EXEC":
+			handleExec(conn, commands)
+			continue
+
+		default:
+			if inMulti {
+				// any other command during MULTI just gets queued
+				multiQueue = append(multiQueue, commands)
+				conn.Write([]byte("+QUEUED\r\n"))
+				continue
+			}
+		}
 		switch command {
 		case "PING":
 			conn.Write([]byte("+PONG\r\n"))

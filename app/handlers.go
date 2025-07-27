@@ -2,14 +2,13 @@ package main
 
 import (
 	"fmt"
-	"net"
+	"io"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// handleEcho handles the ECHO command
-func handleEcho(conn net.Conn, commands []string) {
+func handleEcho(conn io.Writer, commands []string) {
 	if len(commands) >= 2 {
 		response := fmt.Sprintf("$%d\r\n%s\r\n", len(commands[1]), commands[1])
 		conn.Write([]byte(response))
@@ -18,8 +17,7 @@ func handleEcho(conn net.Conn, commands []string) {
 	}
 }
 
-// handleGet handles the GET command
-func handleGet(conn net.Conn, commands []string) {
+func handleGet(conn io.Writer, commands []string) {
 	if len(commands) >= 2 {
 		key := commands[1]
 		val, exists := getValue(key)
@@ -34,8 +32,7 @@ func handleGet(conn net.Conn, commands []string) {
 	}
 }
 
-// handleConfig handles the CONFIG command
-func handleConfig(conn net.Conn, commands []string) {
+func handleConfig(conn io.Writer, commands []string) {
 	if len(commands) != 3 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'config' command\r\n"))
 		return
@@ -48,8 +45,7 @@ func handleConfig(conn net.Conn, commands []string) {
 	}
 }
 
-// handleInfo handles the INFO command
-func handleInfo(conn net.Conn) {
+func handleInfo(conn io.Writer) {
 	var response string
 	if replicaof == "" {
 		masterReplOffset := 0
@@ -60,8 +56,7 @@ func handleInfo(conn net.Conn) {
 	conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(response), response)))
 }
 
-// handleType handles the TYPE command
-func handleType(conn net.Conn, commands []string) {
+func handleType(conn io.Writer, commands []string) {
 	if len(commands) < 2 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'type' command\r\n"))
 		return
@@ -80,8 +75,7 @@ func handleType(conn net.Conn, commands []string) {
 	}
 }
 
-// handleSet handles the SET command
-func handleSet(conn net.Conn, commands []string) {
+func handleSet(conn io.Writer, commands []string) {
 	if len(commands) >= 3 {
 		db[commands[1]] = commands[2]
 		if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
@@ -108,8 +102,7 @@ func handleSet(conn net.Conn, commands []string) {
 	}
 }
 
-// handleKeys handles the KEYS command
-func handleKeys(conn net.Conn, commands []string) {
+func handleKeys(conn io.Writer, commands []string) {
 	if len(commands) != 2 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'keys' command\r\n"))
 		return

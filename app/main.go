@@ -14,25 +14,29 @@ import (
 )
 
 var (
+	// Database
 	db        = make(map[string]string)
-	expiry_db = make(map[string]time.Time)
+	expiryDB  = make(map[string]time.Time)
+	streams   = make(map[string][]streamEntry)
+	streamsMu sync.Mutex
 
-	dbfilename     = ""
-	port           = ""
-	replicaof      = ""
-	master_replid  = ""
+	// Configuration
+	dbfilename   = ""
+	port         = ""
+	replicaof    = ""
+	masterReplID = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+	dirFlag      *string
+	isReplica    bool
+
+	// Replication
 	replicaConns   = make(map[net.Conn]struct{})
 	replicaConnsMu sync.Mutex
 	masterOffset   int64
 	replicaOffsets = make(map[net.Conn]int64)
 	pendingWaits   []waitReq
 	waitMu         sync.Mutex
-	dirFlag        *string
-	isReplica      bool
-	streams        = make(map[string][]streamEntry)
-	streamsMu      sync.Mutex
 
-	// Blocking XREAD support
+	// Blocking XREAD
 	waitingXReads     []waitingXRead
 	waitingXReadsMu   sync.Mutex
 	streamNotifiers   = make(map[string]chan struct{})
@@ -61,27 +65,22 @@ type streamEntry struct {
 
 func main() {
 	fmt.Println("Logs from your program will appear here!")
-	// Define flags
+
 	dirFlag = flag.String("dir", "", "Directory for RDB file")
 	dbfilenameFlag := flag.String("dbfilename", "", "RDB filename")
 	portFlag := flag.String("port", "6379", "Port to listen on")
 	replicaFlag := flag.String("replicaof", "", "Master Redis Server")
-
-	// Parse flags
 	flag.Parse()
-
-	// Assign to global variables (if you want to keep using them)
 
 	dbfilename = *dbfilenameFlag
 	port = *portFlag
 	replicaof = *replicaFlag
 	if replicaof == "" {
-		master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+		masterReplID = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
 	}
 
 	fmt.Printf("Using dir: %s, dbfilename: %s, port: %s\n", *dirFlag, dbfilename, port)
 
-	// --- RDB loading for extensibility ---
 	if *dirFlag != "" && dbfilename != "" {
 		fmt.Println("Loading RDB file from ", *dirFlag, "/", dbfilename)
 		rdbPath := *dirFlag + "/" + dbfilename
@@ -93,7 +92,7 @@ func main() {
 					db[k] = v
 				}
 				for k, t := range exp {
-					expiry_db[k] = t
+					expiryDB[k] = t
 				}
 			} else {
 				fmt.Println("Failed to load RDB:", err)
@@ -151,13 +150,13 @@ func handleConnection(conn net.Conn) {
 	}()
 
 	for {
-		// Parse the RESP array
 		commands, err := parseRESPArray(reader)
-		if err != nil && err.Error() == "EOF" {
-			fmt.Println("Client disconnected")
-			return
-		} else if err != nil {
-			fmt.Println("Error parsing RESP: ", err.Error())
+		if err != nil {
+			if err.Error() == "EOF" {
+				fmt.Println("Client disconnected")
+			} else {
+				fmt.Println("Error parsing RESP:", err.Error())
+			}
 			return
 		}
 
@@ -165,191 +164,195 @@ func handleConnection(conn net.Conn) {
 			continue
 		}
 
-		// Handle commands (case-insensitive)
 		command := strings.ToUpper(commands[0])
-
 		switch command {
 		case "PING":
 			conn.Write([]byte("+PONG\r\n"))
 		case "ECHO":
-			if len(commands) >= 2 {
-				// Echo back the argument
-				response := fmt.Sprintf("$%d\r\n%s\r\n", len(commands[1]), commands[1])
-				conn.Write([]byte(response))
-			} else {
-				// Error: ECHO requires an argument
-				conn.Write([]byte("-ERR wrong number of arguments for 'echo' command\r\n"))
-			}
+			handleEcho(conn, commands)
 		case "SET":
 			handleSet(conn, commands)
 		case "GET":
-			if len(commands) >= 2 {
-				key := commands[1]
-				val, exists := getValue(key)
-				if !exists {
-					conn.Write([]byte("$-1\r\n"))
-				} else {
-					response := fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)
-					conn.Write([]byte(response))
-				}
-			} else {
-				// Error: GET requires an argument
-				conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
-			}
+			handleGet(conn, commands)
 		case "CONFIG":
-			if len(commands) != 3 {
-				conn.Write([]byte("-ERR wrong number of arguments for 'redis-cli' command\r\n"))
-				continue
-			}
-			key := commands[2]
-			if key == "dir" {
-				conn.Write([]byte(fmt.Sprintf("*2\r\n$3\r\ndir\r\n$%d\r\n%s\r\n", len((*dirFlag)), *dirFlag)))
-			} else if key == "dbfilename" {
-				conn.Write([]byte(fmt.Sprintf("*2\r\n$10\r\ndbfilename\r\n$%d\r\n%s\r\n", len(dbfilename), dbfilename)))
-			}
+			handleConfig(conn, commands)
 		case "KEYS":
-			if len(commands) != 2 {
-				conn.Write([]byte("-ERR wrong number of arguments for 'keys' command\r\n"))
-				continue
-			}
 			handleKeys(conn, commands)
 		case "INFO":
-			response := ""
-			if replicaof == "" {
-				master_repl_offset := 0 // Hardcoded to 0 for now
-				response = fmt.Sprintf("role:master master_replid:%s master_repl_offset:%d", master_replid, master_repl_offset)
-			} else {
-				response = "role:slave"
-			}
-
-			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(response), response)))
-
+			handleInfo(conn)
 		case "REPLCONF":
 			conn.Write([]byte("+OK\r\n"))
 		case "PSYNC":
 			handlePSYNC(conn, commands)
 			return
-
 		case "WAIT":
 			handleWait(conn, commands)
-
 		case "TYPE":
-			key := commands[1]
-			val, exists := getValue(key)
-			streamsMu.Lock()
-			_, isStream := streams[key]
-			streamsMu.Unlock()
-			if !exists && !isStream {
-				conn.Write([]byte("+none\r\n"))
-			} else if isStream {
-				conn.Write([]byte("+stream\r\n"))
-			} else {
-				conn.Write([]byte(fmt.Sprintf("+%T\r\n", val)))
-			}
-
+			handleType(conn, commands)
 		case "XADD":
-			if len(commands) < 5 || (len(commands)-3)%2 != 0 {
-				conn.Write([]byte("-ERR wrong number of arguments for 'xadd' command\r\n"))
-				continue
-			}
-			key, id := commands[1], commands[2]
-			fields := make(map[string]string, (len(commands)-3)/2)
-			for i := 3; i < len(commands); i += 2 {
-				fields[commands[i]] = commands[i+1]
-			}
-			parts := strings.Split(id, "-")
-			if len(parts) == 1 && parts[0] == "*" {
-				generateEntryID(&id, key)
-			} else if len(parts) != 2 {
-				conn.Write([]byte("-ERR Invalid ID"))
-				continue
-			} else if parts[1] == "*" {
-				generateSequenceNum(&id, key)
-			}
-
-			// append to stream (thread‑safe)
-			streamsMu.Lock()
-			_, exists := streams[key]
-			if id <= "0-0" {
-				streamsMu.Unlock()
-				conn.Write([]byte("-ERR The ID specified in XADD must be greater than 0-0\r\n"))
-			} else if exists && id <= streams[key][len(streams[key])-1].ID {
-				streamsMu.Unlock()
-				conn.Write([]byte("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"))
-			} else {
-				streams[key] = append(streams[key], streamEntry{
-					ID:     id,
-					Fields: fields,
-				})
-				streamsMu.Unlock()
-
-				// Notify waiting XREAD commands
-				notifyWaitingXReads(key)
-
-				// reply with the ID as a RESP bulk string
-				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
-			}
-
+			handleXAdd(conn, commands)
 		case "XRANGE":
-			if len(commands) != 4 {
-				conn.Write([]byte("-ERR invalid number of commands"))
-				break
-			}
-			key, startID, endID := commands[1], commands[2], commands[3]
-			streamList := streams[key]
-			startFlag := false
-			endFlag := false
-
-			if startID == "-" {
-				startFlag = true
-			}
-
-			if endID == "+" {
-				endFlag = true
-			}
-
-			var resp strings.Builder
-
-			var inRange []streamEntry
-			for _, entry := range streamList {
-				if (startID <= entry.ID || startFlag) && (entry.ID <= endID || endFlag) {
-					inRange = append(inRange, entry)
-				}
-			}
-			resp.WriteString(fmt.Sprintf("*%d\r\n", len(inRange)))
-			for _, entry := range inRange {
-
-				resp.WriteString("*2\r\n")
-				resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(entry.ID), entry.ID))
-				resp.WriteString(fmt.Sprintf("*%d\r\n", len(entry.Fields)*2))
-				for k, v := range entry.Fields {
-					resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k))
-					resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
-				}
-			}
-			conn.Write([]byte(resp.String()))
+			handleXRange(conn, commands)
 		case "XREAD":
 			handleXRead(conn, commands)
-
 		default:
-			// Unknown command
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
 		}
 	}
+}
+
+func handleEcho(conn net.Conn, commands []string) {
+	if len(commands) >= 2 {
+		response := fmt.Sprintf("$%d\r\n%s\r\n", len(commands[1]), commands[1])
+		conn.Write([]byte(response))
+	} else {
+		conn.Write([]byte("-ERR wrong number of arguments for 'echo' command\r\n"))
+	}
+}
+
+func handleGet(conn net.Conn, commands []string) {
+	if len(commands) >= 2 {
+		key := commands[1]
+		val, exists := getValue(key)
+		if !exists {
+			conn.Write([]byte("$-1\r\n"))
+		} else {
+			response := fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)
+			conn.Write([]byte(response))
+		}
+	} else {
+		conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
+	}
+}
+
+func handleConfig(conn net.Conn, commands []string) {
+	if len(commands) != 3 {
+		conn.Write([]byte("-ERR wrong number of arguments for 'config' command\r\n"))
+		return
+	}
+	key := commands[2]
+	if key == "dir" {
+		conn.Write([]byte(fmt.Sprintf("*2\r\n$3\r\ndir\r\n$%d\r\n%s\r\n", len((*dirFlag)), *dirFlag)))
+	} else if key == "dbfilename" {
+		conn.Write([]byte(fmt.Sprintf("*2\r\n$10\r\ndbfilename\r\n$%d\r\n%s\r\n", len(dbfilename), dbfilename)))
+	}
+}
+
+func handleInfo(conn net.Conn) {
+	var response string
+	if replicaof == "" {
+		masterReplOffset := 0
+		response = fmt.Sprintf("role:master master_replid:%s master_repl_offset:%d", masterReplID, masterReplOffset)
+	} else {
+		response = "role:slave"
+	}
+	conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(response), response)))
+}
+
+func handleType(conn net.Conn, commands []string) {
+	if len(commands) < 2 {
+		conn.Write([]byte("-ERR wrong number of arguments for 'type' command\r\n"))
+		return
+	}
+	key := commands[1]
+	val, exists := getValue(key)
+	streamsMu.Lock()
+	_, isStream := streams[key]
+	streamsMu.Unlock()
+	if !exists && !isStream {
+		conn.Write([]byte("+none\r\n"))
+	} else if isStream {
+		conn.Write([]byte("+stream\r\n"))
+	} else {
+		conn.Write([]byte(fmt.Sprintf("+%T\r\n", val)))
+	}
+}
+
+func handleXAdd(conn net.Conn, commands []string) {
+	if len(commands) < 5 || (len(commands)-3)%2 != 0 {
+		conn.Write([]byte("-ERR wrong number of arguments for 'xadd' command\r\n"))
+		return
+	}
+	key, id := commands[1], commands[2]
+	fields := make(map[string]string, (len(commands)-3)/2)
+	for i := 3; i < len(commands); i += 2 {
+		fields[commands[i]] = commands[i+1]
+	}
+
+	parts := strings.Split(id, "-")
+	if len(parts) == 1 && parts[0] == "*" {
+		generateEntryID(&id, key)
+	} else if len(parts) != 2 {
+		conn.Write([]byte("-ERR Invalid ID"))
+		return
+	} else if parts[1] == "*" {
+		generateSequenceNum(&id, key)
+	}
+
+	streamsMu.Lock()
+	_, exists := streams[key]
+	if id <= "0-0" {
+		streamsMu.Unlock()
+		conn.Write([]byte("-ERR The ID specified in XADD must be greater than 0-0\r\n"))
+	} else if exists && id <= streams[key][len(streams[key])-1].ID {
+		streamsMu.Unlock()
+		conn.Write([]byte("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"))
+	} else {
+		streams[key] = append(streams[key], streamEntry{
+			ID:     id,
+			Fields: fields,
+		})
+		streamsMu.Unlock()
+
+		notifyWaitingXReads(key)
+		conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(id), id)))
+	}
+}
+
+func handleXRange(conn net.Conn, commands []string) {
+	if len(commands) != 4 {
+		conn.Write([]byte("-ERR wrong number of arguments for 'xrange' command\r\n"))
+		return
+	}
+	key, startID, endID := commands[1], commands[2], commands[3]
+	streamList := streams[key]
+
+	startFlag := startID == "-"
+	endFlag := endID == "+"
+
+	var resp strings.Builder
+	var inRange []streamEntry
+	for _, entry := range streamList {
+		if (startID <= entry.ID || startFlag) && (entry.ID <= endID || endFlag) {
+			inRange = append(inRange, entry)
+		}
+	}
+
+	resp.WriteString(fmt.Sprintf("*%d\r\n", len(inRange)))
+	for _, entry := range inRange {
+		resp.WriteString("*2\r\n")
+		resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(entry.ID), entry.ID))
+		resp.WriteString(fmt.Sprintf("*%d\r\n", len(entry.Fields)*2))
+		for k, v := range entry.Fields {
+			resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k))
+			resp.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
+		}
+	}
+	conn.Write([]byte(resp.String()))
 }
 
 func handleSet(conn net.Conn, commands []string) {
 	if len(commands) >= 3 {
 		db[commands[1]] = commands[2]
 		if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
-			db_expire_time, err := strconv.Atoi(commands[4])
+			dbExpireTime, err := strconv.Atoi(commands[4])
 			if err != nil {
 				if !isReplica {
 					conn.Write([]byte("-ERR invalid expiration time\r\n"))
 				}
 				return
 			}
-			expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
+			expiryDB[commands[1]] = time.Now().Add(time.Duration(dbExpireTime) * time.Millisecond)
 		}
 		if !isReplica {
 			conn.Write([]byte("+OK\r\n"))
@@ -359,26 +362,26 @@ func handleSet(conn net.Conn, commands []string) {
 			waitMu.Unlock()
 		}
 	} else {
-		// Error: SET requires at least two arguments
 		if !isReplica {
 			conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
 		}
 	}
-
 }
 
 func handleKeys(conn net.Conn, commands []string) {
+	if len(commands) != 2 {
+		conn.Write([]byte("-ERR wrong number of arguments for 'keys' command\r\n"))
+		return
+	}
 
 	pattern := commands[1]
-	keys := make([]string, 0)
+	var keys []string
 	if pattern == "*" {
 		for k := range db {
 			keys = append(keys, k)
 		}
 	}
-	if len(keys) == 0 {
-		conn.Write([]byte("*0\r\n"))
-	}
+
 	conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(keys))))
 	for _, k := range keys {
 		conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(k), k)))
@@ -387,7 +390,7 @@ func handleKeys(conn net.Conn, commands []string) {
 
 func handlePSYNC(conn net.Conn, commands []string) {
 	// Respond with +FULLRESYNC <REPL_ID> 0\r\n
-	response := fmt.Sprintf("+FULLRESYNC %s 0\r\n", master_replid)
+	response := fmt.Sprintf("+FULLRESYNC %s 0\r\n", masterReplID)
 	conn.Write([]byte(response))
 	// Send empty RDB file as $<length>\r\n<contents>
 	var emptyRDB = []byte{
@@ -538,42 +541,35 @@ func handleWait(conn net.Conn, commands []string) {
 
 func getValue(key string) (string, bool) {
 	val, exists := db[key]
-	expiry, has_expiry := expiry_db[key]
-	if has_expiry && time.Now().After(expiry) {
+	expiry, hasExpiry := expiryDB[key]
+	if hasExpiry && time.Now().After(expiry) {
 		// Key expired, delete it
 		delete(db, key)
-		delete(expiry_db, key)
+		delete(expiryDB, key)
 		exists = false // Mark as not existing after deletion
 	}
 	if !exists {
 		return "", false
 	}
 	return val, exists
-
 }
 
 func parseRESPArray(reader *bufio.Reader) ([]string, error) {
-	// Read the first line to get the array indicator
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return nil, err
 	}
 
-	// Remove \r\n
 	line = strings.TrimSpace(line)
-
-	// Check if it's an array
 	if len(line) == 0 || line[0] != '*' {
 		return nil, fmt.Errorf("expected array indicator '*'")
 	}
 
-	// Parse the number of elements
 	count, err := strconv.Atoi(line[1:])
 	if err != nil {
 		return nil, fmt.Errorf("invalid array count: %v", err)
 	}
 
-	// Parse each element
 	commands := make([]string, count)
 	for i := 0; i < count; i++ {
 		command, err := parseRESPBulkString(reader)
@@ -587,34 +583,27 @@ func parseRESPArray(reader *bufio.Reader) ([]string, error) {
 }
 
 func parseRESPBulkString(reader *bufio.Reader) (string, error) {
-	// Read the length line
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return "", err
 	}
 
-	// Remove \r\n
 	line = strings.TrimSpace(line)
-
-	// Check if it's a bulk string
 	if len(line) == 0 || line[0] != '$' {
 		return "", fmt.Errorf("expected bulk string indicator '$'")
 	}
 
-	// Parse the length
 	length, err := strconv.Atoi(line[1:])
 	if err != nil {
 		return "", fmt.Errorf("invalid bulk string length: %v", err)
 	}
 
-	// Read the actual string
 	data := make([]byte, length)
 	_, err = reader.Read(data)
 	if err != nil {
 		return "", err
 	}
 
-	// Read the trailing \r\n
 	_, err = reader.ReadString('\n')
 	if err != nil {
 		return "", err
@@ -760,12 +749,12 @@ func connectToMasterAndHandshake(replicaof string) {
 			if len(commands) >= 3 {
 				db[commands[1]] = commands[2]
 				if len(commands) == 5 && strings.ToUpper(commands[3]) == "PX" {
-					db_expire_time, err := strconv.Atoi(commands[4])
+					dbExpireTime, err := strconv.Atoi(commands[4])
 					if err != nil {
 						fmt.Println("Invalid expiration time in propagated command:", err)
 						continue
 					}
-					expiry_db[commands[1]] = time.Now().Add(time.Duration(db_expire_time) * time.Millisecond)
+					expiryDB[commands[1]] = time.Now().Add(time.Duration(dbExpireTime) * time.Millisecond)
 				}
 				fmt.Printf("Applied propagated SET %s = %s\n", commands[1], commands[2])
 			}
@@ -841,7 +830,6 @@ func generateEntryID(idPtr *string, key string) {
 	generateSequenceNum(idPtr, key)
 }
 
-// Helper function to get or create a notification channel for a stream
 func getStreamNotifier(streamKey string) chan struct{} {
 	streamNotifiersMu.Lock()
 	defer streamNotifiersMu.Unlock()
@@ -850,26 +838,22 @@ func getStreamNotifier(streamKey string) chan struct{} {
 		return notifier
 	}
 
-	// Create new notification channel
 	notifier := make(chan struct{}, 1)
 	streamNotifiers[streamKey] = notifier
 	return notifier
 }
 
-// Helper function to notify waiting XREAD commands when new entries are added
 func notifyWaitingXReads(streamKey string) {
 	streamNotifiersMu.Lock()
 	if notifier, exists := streamNotifiers[streamKey]; exists {
 		select {
 		case notifier <- struct{}{}:
 		default:
-			// Channel is full, which means there are no waiting commands
 		}
 	}
 	streamNotifiersMu.Unlock()
 }
 
-// Helper function to check if there are new entries for a stream
 func hasNewEntries(streamKey string, lastID string) bool {
 	streamsMu.Lock()
 	defer streamsMu.Unlock()
@@ -887,7 +871,6 @@ func hasNewEntries(streamKey string, lastID string) bool {
 	return false
 }
 
-// Helper function to get new entries for a stream
 func getNewEntries(streamKey string, lastID string) []streamEntry {
 	streamsMu.Lock()
 	defer streamsMu.Unlock()
@@ -924,8 +907,14 @@ func handleBlockingXRead(conn net.Conn, streamKeys []string, lastIDs []string, t
 	}
 
 	// Set up blocking wait
-	timeout := time.Duration(timeoutMs) * time.Millisecond
-	deadline := time.Now().Add(timeout)
+	var deadline time.Time
+	if timeoutMs > 0 {
+		timeout := time.Duration(timeoutMs) * time.Millisecond
+		deadline = time.Now().Add(timeout)
+	} else {
+		// For timeoutMs == 0, set a far future deadline (effectively no timeout)
+		deadline = time.Now().AddDate(100, 0, 0) // 100 years from now
+	}
 
 	// Create notification channels for all streams
 	notifiers := make([]chan struct{}, len(streamKeys))
@@ -950,60 +939,40 @@ func handleBlockingXRead(conn net.Conn, streamKeys []string, lastIDs []string, t
 
 	// Start goroutine to wait for notifications or timeout
 	go func() {
-		// Wait for any of the streams to have new data or timeout
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-
 		// Create a channel to receive notifications from any stream
 		notificationChan := make(chan struct{})
 
 		// Start goroutines to listen to all stream notifiers
 		for _, notifier := range notifiers {
 			go func(n chan struct{}) {
-				select {
-				case <-n:
+				for {
 					select {
-					case notificationChan <- struct{}{}:
-					default:
+					case <-n:
+						select {
+						case notificationChan <- struct{}{}:
+						default:
+						}
+					case <-done:
+						return
 					}
-				case <-timer.C:
-					return
 				}
 			}(notifier)
 		}
 
-		select {
-		case <-done:
-			// Another goroutine found data, we're done
-			return
-		case <-timer.C:
-			// Timeout reached
-			waitingXReadsMu.Lock()
-			// Remove from waiting list
-			for i, wr := range waitingXReads {
-				if wr.conn == conn {
-					waitingXReads = append(waitingXReads[:i], waitingXReads[i+1:]...)
-					break
-				}
-			}
-			waitingXReadsMu.Unlock()
+		// Handle timeout only if timeoutMs > 0
+		if timeoutMs > 0 {
+			timeout := time.Duration(timeoutMs) * time.Millisecond
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
 
-			// Send null response
-			conn.Write([]byte("$-1\r\n"))
-			return
-		case <-notificationChan:
-			// Check if we have new data
-			hasNewData := false
-			for i, streamKey := range streamKeys {
-				if hasNewEntries(streamKey, lastIDs[i]) {
-					hasNewData = true
-					break
-				}
-			}
-
-			if hasNewData {
-				// Remove from waiting list
+			select {
+			case <-done:
+				// Another goroutine found data, we're done
+				return
+			case <-timer.C:
+				// Timeout reached
 				waitingXReadsMu.Lock()
+				// Remove from waiting list
 				for i, wr := range waitingXReads {
 					if wr.conn == conn {
 						waitingXReads = append(waitingXReads[:i], waitingXReads[i+1:]...)
@@ -1012,9 +981,66 @@ func handleBlockingXRead(conn net.Conn, streamKeys []string, lastIDs []string, t
 				}
 				waitingXReadsMu.Unlock()
 
-				// Send data
-				handleNonBlockingXRead(conn, streamKeys, lastIDs)
+				// Send null response
+				conn.Write([]byte("$-1\r\n"))
 				return
+			case <-notificationChan:
+				// Check if we have new data
+				hasNewData := false
+				for i, streamKey := range streamKeys {
+					if hasNewEntries(streamKey, lastIDs[i]) {
+						hasNewData = true
+						break
+					}
+				}
+
+				if hasNewData {
+					// Remove from waiting list
+					waitingXReadsMu.Lock()
+					for i, wr := range waitingXReads {
+						if wr.conn == conn {
+							waitingXReads = append(waitingXReads[:i], waitingXReads[i+1:]...)
+							break
+						}
+					}
+					waitingXReadsMu.Unlock()
+
+					// Send data
+					handleNonBlockingXRead(conn, streamKeys, lastIDs)
+					return
+				}
+			}
+		} else {
+			// No timeout - wait indefinitely
+			select {
+			case <-done:
+				// Another goroutine found data, we're done
+				return
+			case <-notificationChan:
+				// Check if we have new data
+				hasNewData := false
+				for i, streamKey := range streamKeys {
+					if hasNewEntries(streamKey, lastIDs[i]) {
+						hasNewData = true
+						break
+					}
+				}
+
+				if hasNewData {
+					// Remove from waiting list
+					waitingXReadsMu.Lock()
+					for i, wr := range waitingXReads {
+						if wr.conn == conn {
+							waitingXReads = append(waitingXReads[:i], waitingXReads[i+1:]...)
+							break
+						}
+					}
+					waitingXReadsMu.Unlock()
+
+					// Send data
+					handleNonBlockingXRead(conn, streamKeys, lastIDs)
+					return
+				}
 			}
 		}
 	}()

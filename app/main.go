@@ -40,10 +40,6 @@ var (
 	waitingXReadsMu   sync.Mutex
 	streamNotifiers   = make(map[string]chan struct{})
 	streamNotifiersMu sync.Mutex
-
-	//Transactions
-	inMulti    = false
-	multiQueue [][]string
 )
 
 type waitReq struct {
@@ -129,6 +125,8 @@ func main() {
 
 func handleConnection(conn net.Conn) {
 	reader := bufio.NewReader(conn)
+	var inMulti = false
+	var multiQueue [][]string
 
 	// Check if we're running as a replica
 	isReplica = replicaof != ""
@@ -171,15 +169,15 @@ func handleConnection(conn net.Conn) {
 
 		switch command {
 		case "MULTI":
-			handleMulti(conn, commands)
+			handleMulti(conn, commands, &inMulti, &multiQueue)
 			continue
 
 		case "DISCARD":
-			handleDiscard(conn, commands)
+			handleDiscard(conn, commands, &inMulti, &multiQueue)
 			continue
 
 		case "EXEC":
-			handleExec(conn, commands)
+			handleExec(conn, commands, &inMulti, &multiQueue)
 			continue
 
 		default:

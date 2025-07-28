@@ -28,39 +28,39 @@ func handleIncr(conn io.Writer, commands []string) {
 	}
 }
 
-func handleMulti(conn net.Conn, commands []string) {
-	if inMulti {
+func handleMulti(conn io.Writer, commands []string, inMulti *bool, multiQueue *[][]string) {
+	if *inMulti {
 		conn.Write([]byte("-ERR MULTI calls can not be nested\r\n"))
 	} else {
-		inMulti = true
-		multiQueue = multiQueue[:0]
+		*inMulti = true
+		*multiQueue = (*multiQueue)[:0]
 		conn.Write([]byte("+OK\r\n"))
 	}
 }
 
-func handleDiscard(conn net.Conn, commands []string) {
-	if !inMulti {
+func handleDiscard(conn io.Writer, commands []string, inMulti *bool, multiQueue *[][]string) {
+	if !*inMulti {
 		conn.Write([]byte("-ERR DISCARD without MULTI\r\n"))
 	} else {
-		inMulti = false
-		multiQueue = multiQueue[:0]
+		*inMulti = false
+		*multiQueue = (*multiQueue)[:0]
 		conn.Write([]byte("+OK\r\n"))
 	}
 }
 
-func handleExec(conn net.Conn, commands []string) {
-	if !inMulti {
+func handleExec(conn net.Conn, commands []string, inMulti *bool, multiQueue *[][]string) {
+	if !*inMulti {
 		conn.Write([]byte("-ERR EXEC without MULTI\r\n"))
 	} else {
 		// execute queued commands
-		conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(multiQueue))))
-		for _, queued := range multiQueue {
+		conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(*multiQueue))))
+		for _, queued := range *multiQueue {
 			// here you can call a helper that takes []string and
 			// returns its RESP output as []byte, e.g. execOne(queued)
 			conn.Write(execOne(queued))
 		}
-		inMulti = false
-		multiQueue = multiQueue[:0]
+		*inMulti = false
+		*multiQueue = (*multiQueue)[:0]
 	}
 }
 

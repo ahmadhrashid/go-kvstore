@@ -11,6 +11,9 @@ func handleRPush(conn io.Writer, commands []string) {
 		return
 	}
 	key := commands[1]
+	for _, val := range commands[2:] {
+		lists[key] = append(lists[key], val)
+	}
 	lists[key] = append(lists[key], commands[2])
 	fmt.Fprintf(conn, ":%d\r\n", len(lists[key]))
 }

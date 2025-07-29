@@ -8,7 +8,7 @@ import (
 
 func handleRPush(conn io.Writer, commands []string) {
 	if len(commands) < 3 {
-		conn.Write([]byte("-ERR incorrect number of arguments for RPUSH"))
+		conn.Write([]byte("-ERR incorrect number of arguments for RPUSH\r\n"))
 		return
 	}
 	key := commands[1]
@@ -76,7 +76,7 @@ func handleLRange(conn io.Writer, commands []string) {
 
 func handleLPush(conn io.Writer, commands []string) {
 	if len(commands) < 3 {
-		conn.Write([]byte("-ERR incorrect number of arguments for LPUSH"))
+		conn.Write([]byte("-ERR incorrect number of arguments for LPUSH\r\n"))
 		return
 	}
 	key := commands[1]
@@ -88,8 +88,54 @@ func handleLPush(conn io.Writer, commands []string) {
 
 func handleLLen(conn io.Writer, commands []string) {
 	if len(commands) != 2 {
-		fmt.Fprint(conn, "-ERR incorrect number of arguments for LLEN")
+		fmt.Fprint(conn, "-ERR incorrect number of arguments for LLEN\r\n")
 		return
 	}
 	fmt.Fprintf(conn, ":%d\r\n", len(lists[commands[1]]))
+}
+
+func handleLPop(conn io.Writer, commands []string) {
+	if len(commands) != 2 && len(commands) != 3 {
+		fmt.Fprintf(conn, "-ERR incorrect number of arguments for LPOP\r\n")
+		return
+	}
+	if len(commands) == 2 {
+		handleSingleLPPOP(conn, commands)
+	} else {
+		handleMultiLPPOP(conn, commands)
+	}
+
+}
+
+func handleSingleLPPOP(conn io.Writer, commands []string) {
+
+	key := commands[1]
+	if list, exists := lists[key]; !exists || len(list) == 0 {
+		fmt.Fprint(conn, "$-1\r\n")
+		return
+	}
+	val := lists[key][0]
+	lists[key] = lists[key][1:]
+	fmt.Fprintf(conn, "$%d\r\n%s\r\n", len(val), val)
+}
+
+func handleMultiLPPOP(conn io.Writer, commands []string) {
+	key := commands[1]
+	numElems, err := strconv.Atoi(commands[2])
+	if err != nil {
+		fmt.Fprint(conn, "-ERR third argument must be int\r\n")
+		return
+	}
+	list, exists := lists[key]
+	if !exists || len(list) <= numElems || len(list) == 0 {
+		lists[key] = nil
+		resp := encodeRESPArray(list...)
+		fmt.Fprint(conn, resp)
+		return
+	}
+
+	popped := list[:numElems]
+	lists[key] = list[numElems:]
+	resp := encodeRESPArray(popped...)
+	fmt.Fprint(conn, resp)
 }

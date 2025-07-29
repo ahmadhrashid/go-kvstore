@@ -73,3 +73,15 @@ func handleLRange(conn io.Writer, commands []string) {
 	// write as a RESP array
 	fmt.Fprint(conn, encodeRESPArray(slice...))
 }
+
+func handleLPush(conn io.Writer, commands []string) {
+	if len(commands) < 3 {
+		conn.Write([]byte("-ERR incorrect number of arguments for LPUSH"))
+		return
+	}
+	key := commands[1]
+	for _, val := range commands[2:] {
+		lists[key] = append([]string{val}, lists[key]...)
+	}
+	fmt.Fprintf(conn, ":%d\r\n", len(lists[key]))
+}

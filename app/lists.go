@@ -85,3 +85,11 @@ func handleLPush(conn io.Writer, commands []string) {
 	}
 	fmt.Fprintf(conn, ":%d\r\n", len(lists[key]))
 }
+
+func handleLLen(conn io.Writer, commands []string) {
+	if len(commands) != 2 {
+		fmt.Fprint(conn, "-ERR incorrect number of arguments for LLEN")
+		return
+	}
+	fmt.Fprintf(conn, ":%d\r\n", len(lists[commands[1]]))
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strconv"
 )
 
 func handleRPush(conn io.Writer, commands []string) {
@@ -15,4 +16,60 @@ func handleRPush(conn io.Writer, commands []string) {
 		lists[key] = append(lists[key], val)
 	}
 	fmt.Fprintf(conn, ":%d\r\n", len(lists[key]))
+}
+
+func handleLRange(conn io.Writer, commands []string) {
+	// LRANGE key start stop
+	if len(commands) != 4 {
+		fmt.Fprint(conn, "-ERR incorrect number of arguments for LRANGE\r\n")
+		return
+	}
+	key := commands[1]
+	list := lists[key] // nil slice if key doesn't exist
+
+	// parse start and stop
+	start, err := strconv.Atoi(commands[2])
+	if err != nil {
+		fmt.Fprint(conn, "-ERR start index must be an integer\r\n")
+		return
+	}
+	stop, err := strconv.Atoi(commands[3])
+	if err != nil {
+		fmt.Fprint(conn, "-ERR stop index must be an integer\r\n")
+		return
+	}
+
+	n := len(list)
+	// convert negative indexes
+	if start < 0 {
+		start = n + start
+	}
+	if stop < 0 {
+		stop = n + stop
+	}
+	// clamp to [0..n-1]
+	if start < 0 {
+		start = 0
+	}
+	if stop < 0 {
+		fmt.Fprint(conn, "*0\r\n")
+		return
+	}
+	if start >= n {
+		fmt.Fprint(conn, "*0\r\n")
+		return
+	}
+	if stop >= n {
+		stop = n - 1
+	}
+	// invalid range
+	if start > stop {
+		fmt.Fprint(conn, "*0\r\n")
+		return
+	}
+
+	// slice is inclusive of stop
+	slice := list[start : stop+1]
+	// write as a RESP array
+	fmt.Fprint(conn, encodeRESPArray(slice...))
 }

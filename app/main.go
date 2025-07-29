@@ -225,6 +225,8 @@ func handleConnection(conn net.Conn) {
 			handleIncr(conn, commands)
 		case "RPUSH":
 			handleRPush(conn, commands)
+		case "LRANGE":
+			handleLRange(conn, commands)
 		default:
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
 		}

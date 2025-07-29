@@ -40,6 +40,9 @@ var (
 	waitingXReadsMu   sync.Mutex
 	streamNotifiers   = make(map[string]chan struct{})
 	streamNotifiersMu sync.Mutex
+
+	// Lists
+	lists = make(map[string][]string)
 )
 
 type waitReq struct {
@@ -220,6 +223,8 @@ func handleConnection(conn net.Conn) {
 			handleXRead(conn, commands)
 		case "INCR":
 			handleIncr(conn, commands)
+		case "RPUSH":
+			handleRPush(conn, commands)
 		default:
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
 		}

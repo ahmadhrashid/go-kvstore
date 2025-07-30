@@ -163,9 +163,10 @@ func handleBLPop(conn io.Writer, commands []string) {
 	}
 
 	listKeys := commands[1 : len(commands)-1]
-	timeoutSec, err := strconv.Atoi(commands[len(commands)-1])
-	if err != nil || timeoutSec < 0 {
-		fmt.Fprint(conn, "-ERR timeout must be a non-negative integer\r\n")
+	timeoutStr := commands[len(commands)-1]
+	timeoutFloat, err := strconv.ParseFloat(timeoutStr, 64)
+	if err != nil || timeoutFloat < 0 {
+		fmt.Fprint(conn, "-ERR timeout must be a non-negative number\r\n")
 		return
 	}
 
@@ -185,7 +186,7 @@ func handleBLPop(conn io.Writer, commands []string) {
 	req := &blpopRequest{
 		conn:     conn,
 		listKeys: listKeys,
-		timeout:  time.Duration(timeoutSec) * time.Second,
+		timeout:  time.Duration(timeoutFloat * float64(time.Second)),
 		done:     make(chan struct{}),
 	}
 
@@ -195,7 +196,7 @@ func handleBLPop(conn io.Writer, commands []string) {
 
 	// Handle timeout
 	go func() {
-		if timeoutSec > 0 {
+		if timeoutFloat > 0 {
 			select {
 			case <-time.After(req.timeout):
 				blockedClientsMu.Lock()
@@ -209,7 +210,7 @@ func handleBLPop(conn io.Writer, commands []string) {
 
 				fmt.Fprint(conn, "$-1\r\n")
 			case <-req.done:
-
+				// already handled
 			}
 		}
 	}()

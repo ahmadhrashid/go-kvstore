@@ -157,6 +157,8 @@ func handleConnection(conn net.Conn) {
 		waitingXReadsMu.Unlock()
 	}()
 
+	defer handleDisconnect(conn)
+
 	for {
 		commands, err := parseRESPArray(reader)
 		if err != nil {
@@ -173,6 +175,10 @@ func handleConnection(conn net.Conn) {
 		}
 
 		command := strings.ToUpper(commands[0])
+		// if subscribeMode{
+		// 	handleSubscribeMode(conn, commands)
+		// 	continue
+		// }
 
 		switch command {
 		case "MULTI":

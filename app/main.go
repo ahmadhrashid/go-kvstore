@@ -175,10 +175,10 @@ func handleConnection(conn net.Conn) {
 		}
 
 		command := strings.ToUpper(commands[0])
-		// if subscribeMode{
-		// 	handleSubscribeMode(conn, commands)
-		// 	continue
-		// }
+		if subscribeMode {
+			handleSubscribeMode(conn, commands)
+			continue
+		}
 
 		switch command {
 		case "MULTI":

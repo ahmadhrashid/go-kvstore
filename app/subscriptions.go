@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 )
 
@@ -33,9 +34,31 @@ func handleSubscribe(conn io.Writer, commands []string) {
 	subscribeMode = true
 }
 
-// func handleSubscribeMode(conn io.Writer, commands []string) {
+func handleSubscribeMode(conn io.Writer, commands []string) {
+	command := strings.ToUpper(commands[0])
 
-// }
+	switch command {
+	case "SUBSCRIBE":
+		handleSubscribe(conn, commands)
+	case "UNSUBSCRIBE":
+		return
+	case "PSUBSCRIBE":
+		return
+	case "PUNSUBSCRIBE":
+		return
+	case "PING":
+		handleSubPing(conn, commands)
+	case "QUIT":
+		return
+	default:
+		fmt.Fprintf(conn, "-ERR Can't execute '%s': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n", command)
+	}
+
+}
+
+func handleSubPing(conn io.Writer, commands []string) {
+	fmt.Fprint(conn, encodeRESPArray("+PONG", ""))
+}
 
 func handleDisconnect(conn io.Writer) {
 	subMu.Lock()

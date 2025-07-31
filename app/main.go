@@ -43,6 +43,10 @@ var (
 
 	// Lists
 	lists = make(map[string][]string)
+
+	// Pub/Sub
+	subscribeMode = false
+	subscriptions []string
 )
 
 type waitReq struct {
@@ -235,6 +239,8 @@ func handleConnection(conn net.Conn) {
 			handleLPop(conn, commands)
 		case "BLPOP":
 			handleBLPop(conn, commands)
+		case "SUBSCRIBE":
+			handleSubscribe(conn, commands)
 		default:
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
 		}

@@ -3,35 +3,23 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"strings"
-	"sync"
 )
 
-var clientSubscriptions = make(map[io.Writer]map[string]struct{})
-var subMu sync.Mutex
-
-func handleSubscribe(conn io.Writer, commands []string) {
-	if len(commands) != 2 {
-		fmt.Fprint(conn, "-ERR Invalid number of arguments for SUBSCRIBE\r\n")
+func handleSubscribe(state *clientState, commands []string) {
+	if len(commands) < 2 {
+		fmt.Fprint(state.conn, "-ERR wrong number of arguments for 'subscribe'\r\n")
 		return
 	}
 
-	channel := commands[1]
+	state.inSubscribe = true // client now enters subscribe mode
 
-	subMu.Lock()
-	defer subMu.Unlock()
-
-	if _, ok := clientSubscriptions[conn]; !ok {
-		clientSubscriptions[conn] = make(map[string]struct{})
+	for _, channel := range commands[1:] {
+		state.subscribed[channel] = struct{}{}
+		fmt.Fprintf(state.conn, "*3\r\n$9\r\nsubscribe\r\n$%d\r\n%s\r\n:%d\r\n",
+			len(channel), channel, len(state.subscribed))
 	}
-
-	// Add to client-specific set of subscriptions
-	clientSubs := clientSubscriptions[conn]
-	clientSubs[channel] = struct{}{} // idempotent
-
-	fmt.Fprintf(conn, "*3\r\n$9\r\nsubscribe\r\n$%d\r\n%s\r\n:%d\r\n",
-		len(channel), channel, len(clientSubs))
-	subscribeMode = true
 }
 
 func handleSubscribeMode(conn io.Writer, commands []string) {
@@ -39,7 +27,8 @@ func handleSubscribeMode(conn io.Writer, commands []string) {
 
 	switch command {
 	case "SUBSCRIBE":
-		handleSubscribe(conn, commands)
+		state := clients[conn]
+		handleSubscribe(state, commands)
 	case "UNSUBSCRIBE":
 		return
 	case "PSUBSCRIBE":
@@ -57,11 +46,9 @@ func handleSubscribeMode(conn io.Writer, commands []string) {
 }
 
 func handleSubPing(conn io.Writer, commands []string) {
-	fmt.Fprint(conn, encodeRESPArray("+PONG", ""))
+	fmt.Fprint(conn, "*2\r\n$4\r\npong\r\n$0\r\n\r\n")
 }
 
-func handleDisconnect(conn io.Writer) {
-	subMu.Lock()
-	delete(clientSubscriptions, conn)
-	subMu.Unlock()
+func handleDisconnect(conn net.Conn) {
+	delete(clients, conn)
 }

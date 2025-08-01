@@ -286,7 +286,7 @@ func connectToMasterAndHandshake(replicaof string) {
 				fmt.Printf("Applied propagated SET %s = %s\n", commands[1], commands[2])
 			}
 		case "REPLCONF":
-			if strings.ToUpper(commands[1]) == "GETACK" {
+			if len(commands) >= 3 && strings.ToUpper(commands[1]) == "GETACK" && commands[2] == "*" {
 				resp := encodeRESPArray("REPLCONF", "ACK", fmt.Sprintf("%d", offset))
 				_, err = conn.Write([]byte(resp))
 				if err != nil {

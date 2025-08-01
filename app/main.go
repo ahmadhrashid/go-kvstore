@@ -47,6 +47,7 @@ var (
 	// Pub/Sub
 	subscribeMode = false
 	subscriptions []string
+	clients       = make(map[io.Writer]*clientState)
 )
 
 type waitReq struct {
@@ -67,6 +68,12 @@ type waitingXRead struct {
 type streamEntry struct {
 	ID     string
 	Fields map[string]string
+}
+
+type clientState struct {
+	conn        io.Writer
+	subscribed  map[string]struct{}
+	inSubscribe bool
 }
 
 func main() {
@@ -135,6 +142,12 @@ func handleConnection(conn net.Conn) {
 	var inMulti = false
 	var multiQueue [][]string
 
+	clients[conn] = &clientState{
+		conn:        conn,
+		subscribed:  make(map[string]struct{}),
+		inSubscribe: false,
+	}
+
 	// Check if we're running as a replica
 	isReplica = replicaof != ""
 
@@ -175,7 +188,9 @@ func handleConnection(conn net.Conn) {
 		}
 
 		command := strings.ToUpper(commands[0])
-		if subscribeMode {
+		state := clients[conn]
+
+		if state.inSubscribe {
 			handleSubscribeMode(conn, commands)
 			continue
 		}
@@ -246,7 +261,7 @@ func handleConnection(conn net.Conn) {
 		case "BLPOP":
 			handleBLPop(conn, commands)
 		case "SUBSCRIBE":
-			handleSubscribe(conn, commands)
+			handleSubscribe(state, commands)
 		default:
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
 		}

@@ -264,6 +264,8 @@ func handleConnection(conn net.Conn) {
 			handleSubscribe(state, commands)
 		case "PUBLISH":
 			handlePublish(conn, commands)
+		case "UNSUBSCRIBE":
+			handleUnsubscribe(conn, commands)
 		default:
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
 		}

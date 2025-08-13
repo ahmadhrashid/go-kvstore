@@ -30,7 +30,7 @@ func handleSubscribeMode(conn io.Writer, commands []string) {
 		state := clients[conn]
 		handleSubscribe(state, commands)
 	case "UNSUBSCRIBE":
-		return
+		handleUnsubscribe(conn, commands)
 	case "PSUBSCRIBE":
 		return
 	case "PUNSUBSCRIBE":
@@ -72,4 +72,20 @@ func handlePublish(conn io.Writer, commands []string) {
 	}
 
 	fmt.Fprintf(conn, ":%d\r\n", numSubscribers)
+}
+
+func handleUnsubscribe(conn io.Writer, commands []string) {
+	if len(commands) < 2 {
+		fmt.Fprint(conn, "-ERR wrong number of arguments for 'unsubscribe'\r\n")
+		return
+	}
+
+	channel := commands[1]
+	state := clients[conn]
+
+	delete(state.subscribed, channel)
+
+	fmt.Fprintf(conn, "*3\r\n$11\r\nunsubscribe\r\n$%d\r\n%s\r\n:%d\r\n",
+		len(channel), channel, len(state.subscribed))
+
 }

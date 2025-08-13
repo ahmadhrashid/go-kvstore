@@ -262,6 +262,8 @@ func handleConnection(conn net.Conn) {
 			handleBLPop(conn, commands)
 		case "SUBSCRIBE":
 			handleSubscribe(state, commands)
+		case "PUBLISH":
+			handlePublish(conn, commands)
 		default:
 			conn.Write([]byte("-ERR unknown command '" + commands[0] + "'\r\n"))
 		}

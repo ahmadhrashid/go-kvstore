@@ -52,3 +52,24 @@ func handleSubPing(conn io.Writer, commands []string) {
 func handleDisconnect(conn net.Conn) {
 	delete(clients, conn)
 }
+
+func handlePublish(conn io.Writer, commands []string) {
+	if len(commands) < 3 {
+		fmt.Fprint(conn, "-ERR wrong number of arguments for 'publish'\r\n")
+		return
+	}
+
+	channel := commands[1]
+	message := commands[2]
+
+	numSubscribers := 0
+	for conn, state := range clients {
+		if _, ok := state.subscribed[channel]; ok {
+			numSubscribers++
+			fmt.Fprintf(conn, "*3\r\n$7\r\nmessage\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n",
+				len(channel), channel, len(message), message)
+		}
+	}
+
+	fmt.Fprintf(conn, ":%d\r\n", numSubscribers)
+}

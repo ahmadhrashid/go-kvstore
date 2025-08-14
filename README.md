@@ -17,7 +17,7 @@ This project reimplements a useful subset of Redis functionality: networking, co
   * [Basic commands](#basic-commands)
   * [Blocking lists / streams](#blocking-lists--streams)
   * [Replication example](#replication-example)
-  * [Pub/Sub example (`SUBSCRIBE` / `PUBLISH` / `UNSUBSCRIBE`)](#pubsub-example-subscribe--publish--unsubscribe)
+  * [Pub/Sub example](#pubsub-example)
 * [Design & internals](#design--internals)
 * [Concurrency & correctness notes](#concurrency--correctness-notes)
 * [Limitations & TODOs](#limitations--todos)
@@ -206,7 +206,7 @@ Watch master / replica logs (stdout) to observe:
 
 Example: `WAIT 1 1000` on master will block until one replica acknowledges or until timeout.
 
-### Pub/Sub example (`SUBSCRIBE` / `PUBLISH` / `UNSUBSCRIBE`)
+### Pub/Sub example 
 
 **Subscribe**
 
@@ -345,3 +345,4 @@ The server will respond with an unsubscribe confirmation similar to:
 **LinkedIn:** `https://linkedin.com/in/ahmadhrashid`
 
 ---
+

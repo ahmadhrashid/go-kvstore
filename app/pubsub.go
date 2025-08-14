@@ -27,7 +27,9 @@ func handleSubscribeMode(conn io.Writer, commands []string) {
 
 	switch command {
 	case "SUBSCRIBE":
+		clientsMu.Lock()
 		state := clients[conn]
+		clientsMu.Unlock()
 		handleSubscribe(state, commands)
 	case "UNSUBSCRIBE":
 		handleUnsubscribe(conn, commands)
@@ -50,7 +52,9 @@ func handleSubPing(conn io.Writer, commands []string) {
 }
 
 func handleDisconnect(conn net.Conn) {
+	clientsMu.Lock()
 	delete(clients, conn)
+	clientsMu.Unlock()
 }
 
 func handlePublish(conn io.Writer, commands []string) {
@@ -63,14 +67,17 @@ func handlePublish(conn io.Writer, commands []string) {
 	message := commands[2]
 
 	numSubscribers := 0
+	clientsMu.Lock()
 	for conn, state := range clients {
+		clientsMu.Unlock()
 		if _, ok := state.subscribed[channel]; ok {
 			numSubscribers++
 			fmt.Fprintf(conn, "*3\r\n$7\r\nmessage\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n",
 				len(channel), channel, len(message), message)
 		}
+		clientsMu.Lock()
 	}
-
+	clientsMu.Unlock()
 	fmt.Fprintf(conn, ":%d\r\n", numSubscribers)
 }
 
@@ -81,7 +88,9 @@ func handleUnsubscribe(conn io.Writer, commands []string) {
 	}
 
 	channel := commands[1]
+	clientsMu.Lock()
 	state := clients[conn]
+	clientsMu.Unlock()
 
 	delete(state.subscribed, channel)
 

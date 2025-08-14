@@ -48,6 +48,7 @@ var (
 	subscribeMode = false
 	subscriptions []string
 	clients       = make(map[io.Writer]*clientState)
+	clientsMu     sync.Mutex
 )
 
 type waitReq struct {
@@ -142,12 +143,13 @@ func handleConnection(conn net.Conn) {
 	var inMulti = false
 	var multiQueue [][]string
 
+	clientsMu.Lock()
 	clients[conn] = &clientState{
 		conn:        conn,
 		subscribed:  make(map[string]struct{}),
 		inSubscribe: false,
 	}
-
+	clientsMu.Unlock()
 	// Check if we're running as a replica
 	isReplica = replicaof != ""
 
@@ -188,7 +190,9 @@ func handleConnection(conn net.Conn) {
 		}
 
 		command := strings.ToUpper(commands[0])
+		clientsMu.Lock()
 		state := clients[conn]
+		clientsMu.Unlock()
 
 		if state.inSubscribe {
 			handleSubscribeMode(conn, commands)

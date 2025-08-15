@@ -1,4 +1,4 @@
-# Redis Clone (Go)
+# Gedis - Redis Clone in Go
 
 A Redis-compatible in-memory key–value server implemented in **Go**.
 This project reimplements a useful subset of Redis functionality: networking, concurrency, blocking reads, streams, transactions, leader–follower replication and pub/sub to demonstrate systems and distributed-systems primitives. The server speaks the RESP protocol so it can be exercised with standard Redis tooling (e.g. `redis-cli`).
@@ -345,4 +345,5 @@ The server will respond with an unsubscribe confirmation similar to:
 **LinkedIn:** `https://linkedin.com/in/ahmadhrashid`
 
 ---
+
 
